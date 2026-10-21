@@ -8,6 +8,7 @@ use std::process::ExitStatus;
 
 use pixi_chef::cook::{CookError, SkipList, Termination, cook, install_command};
 use pixi_chef::prepare::{Workspace, prepare};
+use pixi_chef::workspace::ScopeError;
 use rattler_conda_types::Subdir;
 use rattler_lock::{CondaPackageData, LockFile, LockedPackage, PypiPackageData};
 
@@ -66,7 +67,7 @@ fn unknown_environment_is_an_error() -> TestResult {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     assert!(matches!(
         SkipList::new(&lock, "nope", Subdir::Linux64),
-        Err(CookError::UnknownEnvironment(name)) if name == "nope"
+        Err(CookError::Scope(ScopeError::UnknownEnvironment(name))) if name == "nope"
     ));
     Ok(())
 }
@@ -331,7 +332,7 @@ fn environment_without_the_platform_is_an_error() -> TestResult {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     assert!(matches!(
         SkipList::new(&lock, "conda", Subdir::Osx64),
-        Err(CookError::NotLockedForPlatform(_))
+        Err(CookError::Scope(ScopeError::NotLockedForPlatform(_)))
     ));
     Ok(())
 }

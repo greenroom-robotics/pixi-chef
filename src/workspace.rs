@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use rattler_conda_types::Subdir;
 use rattler_lock::{
     CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
 };
@@ -51,4 +52,37 @@ pub fn location(package: &LockedPackage) -> &UrlOrPath {
         LockedPackage::Conda(package) => package.location(),
         LockedPackage::Pypi(package) => package.location(),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopeError {
+    #[error("environment {0} is not in the lock file")]
+    UnknownEnvironment(String),
+    #[error("environment {0} has no packages locked for this platform")]
+    NotLockedForPlatform(String),
+    #[error("this platform has no conda subdir")]
+    UnsupportedPlatform,
+}
+
+pub fn current_subdir() -> Result<Subdir, ScopeError> {
+    Subdir::current().ok_or(ScopeError::UnsupportedPlatform)
+}
+
+/// Every package one environment locks for a subdir.
+pub fn scoped_packages<'lock>(
+    lock: &'lock LockFile,
+    environment: &str,
+    subdir: Subdir,
+) -> Result<Vec<&'lock LockedPackage>, ScopeError> {
+    let locked = lock
+        .environment(environment)
+        .ok_or_else(|| ScopeError::UnknownEnvironment(environment.to_owned()))?;
+    let mut platforms = locked
+        .packages_by_platform()
+        .filter(|(platform, _)| platform.subdir() == subdir)
+        .peekable();
+    if platforms.peek().is_none() {
+        return Err(ScopeError::NotLockedForPlatform(environment.to_owned()));
+    }
+    Ok(platforms.flat_map(|(_, packages)| packages).collect())
 }

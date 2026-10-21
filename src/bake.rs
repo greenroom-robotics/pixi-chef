@@ -6,12 +6,12 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
-use rattler_conda_types::Subdir;
-use rattler_lock::{
-    CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
+use rattler_lock::UrlOrPath;
+
+use crate::workspace::{
+    LOCK_FILE, LockError, ScopeError, SourcePackage, current_subdir, read_lock, scoped_packages,
 };
 
-const LOCK_FILE: &str = "pixi.lock";
 const EXPORT_PIXI_EXE: &str = "export PIXI_EXE=";
 const HOOK_PATH: &str = "etc/profile.d/pixi-env.sh";
 const ENTRYPOINT_PATH: &str = "entrypoint.sh";
@@ -26,12 +26,8 @@ pub enum BakeError {
     MissingEnvironment(PathBuf),
     #[error("environment {0} has no bin/bash; add `bash` to the workspace dependencies")]
     MissingBash(PathBuf),
-    #[error("environment {0} is not in the lock file")]
-    UnknownEnvironment(String),
-    #[error("environment {0} is not locked for this platform")]
-    NotLockedForPlatform(String),
-    #[error("this platform has no conda subdir")]
-    UnsupportedPlatform,
+    #[error(transparent)]
+    Scope(#[from] ScopeError),
     #[error("`pixi shell-hook` output for environment {0} never used the host PATH marker")]
     HookIgnoresPath(String),
     #[error("hook sources {0}, which does not exist")]
@@ -52,11 +48,8 @@ pub enum BakeError {
     Spawn { command: String, source: io::Error },
     #[error("`pixi shell-hook` output is not UTF-8")]
     HookNotUtf8,
-    #[error("reading lock file {path}: {source}")]
-    Lock {
-        path: PathBuf,
-        source: Box<ParseCondaLockError>,
-    },
+    #[error(transparent)]
+    Lock(#[from] LockError),
     #[error("{path}: {source}")]
     Io { path: PathBuf, source: io::Error },
 }
@@ -267,35 +260,17 @@ impl Default for Pixi {
 }
 
 fn source_dirs(workspace: &AbsPath, env: &str) -> Result<Vec<AbsPath>, BakeError> {
-    let lock_path = workspace.as_path().join(LOCK_FILE);
-    let lock = LockFile::from_path(&lock_path).map_err(|source| BakeError::Lock {
-        path: lock_path,
-        source: Box::new(source),
-    })?;
-    let subdir = Subdir::current().ok_or(BakeError::UnsupportedPlatform)?;
-    let environment = lock
-        .environment(env)
-        .ok_or_else(|| BakeError::UnknownEnvironment(env.to_string()))?;
-    let mut platforms = environment
-        .packages_by_platform()
-        .filter(|(platform, _)| platform.subdir() == subdir)
-        .peekable();
-    if platforms.peek().is_none() {
-        return Err(BakeError::NotLockedForPlatform(env.to_string()));
-    }
+    let lock = read_lock(&workspace.as_path().join(LOCK_FILE))?;
+    let packages = scoped_packages(&lock, env, current_subdir()?)?;
     let mut dirs = BTreeSet::new();
-    for (_, packages) in platforms {
-        for package in packages {
-            let location = match package {
-                LockedPackage::Conda(CondaPackageData::Source(source)) => Some(&source.location),
-                LockedPackage::Pypi(PypiPackageData::Source(source)) => Some(&*source.location),
-                LockedPackage::Conda(CondaPackageData::Binary(_))
-                | LockedPackage::Pypi(PypiPackageData::Distribution(_)) => None,
-            };
-            if let Some(UrlOrPath::Path(path)) = location {
-                let dir = workspace.as_path().join(path.as_str());
-                dirs.insert(AbsPath::new(&dir).map_err(|_| BakeError::MissingSourceDir(dir))?);
-            }
+    for package in packages {
+        if let Some(SourcePackage {
+            location: UrlOrPath::Path(path),
+            ..
+        }) = SourcePackage::of(package)
+        {
+            let dir = workspace.as_path().join(path.as_str());
+            dirs.insert(AbsPath::new(&dir).map_err(|_| BakeError::MissingSourceDir(dir))?);
         }
     }
     Ok(outermost(dirs))

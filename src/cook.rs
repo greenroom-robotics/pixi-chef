@@ -3,20 +3,19 @@ use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use rattler_conda_types::Subdir;
-use rattler_lock::{LockFile, LockedPackage, Platform};
+use rattler_lock::LockFile;
 
-use crate::workspace::{LOCK_FILE, LockError, MANIFEST_FILE, SourcePackage, read_lock};
+use crate::workspace::{
+    LOCK_FILE, LockError, MANIFEST_FILE, ScopeError, SourcePackage, current_subdir, read_lock,
+    scoped_packages,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CookError {
     #[error(transparent)]
     Lock(#[from] LockError),
-    #[error("environment {0} is not in the lock file")]
-    UnknownEnvironment(String),
-    #[error("environment {0} has no packages locked for this platform")]
-    NotLockedForPlatform(String),
-    #[error("this platform has no conda subdir")]
-    UnsupportedPlatform,
+    #[error(transparent)]
+    Scope(#[from] ScopeError),
     #[error("running pixi")]
     Spawn(#[source] std::io::Error),
 }
@@ -27,36 +26,18 @@ pub struct SkipList(BTreeSet<String>);
 
 impl SkipList {
     pub fn new(lock: &LockFile, name: &str, subdir: Subdir) -> Result<Self, CookError> {
-        let environment = lock
-            .environment(name)
-            .ok_or_else(|| CookError::UnknownEnvironment(name.to_owned()))?;
-        let mut platforms = environment
-            .packages_by_platform()
-            .filter(|(platform, _)| platform.subdir() == subdir)
-            .peekable();
-        if platforms.peek().is_none() {
-            return Err(CookError::NotLockedForPlatform(name.to_owned()));
-        }
-        Ok(Self(source_names(platforms)))
+        let packages = scoped_packages(lock, name, subdir)?;
+        Ok(Self(
+            packages
+                .into_iter()
+                .filter_map(|package| SourcePackage::of(package).map(|source| source.name))
+                .collect(),
+        ))
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
     }
-}
-
-fn source_names<'lock, P, I>(platforms: P) -> BTreeSet<String>
-where
-    P: Iterator<Item = (Platform<'lock>, I)>,
-    I: Iterator<Item = &'lock LockedPackage>,
-{
-    platforms
-        .flat_map(|(_, packages)| {
-            packages
-                .filter_map(|package| SourcePackage::of(package).map(|source| source.name))
-                .collect::<Vec<_>>()
-        })
-        .collect()
 }
 
 pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> Command {
@@ -75,7 +56,7 @@ pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> 
 
 pub fn cook(workspace: &Path, environment: &str) -> Result<ExitStatus, CookError> {
     let lock = read_lock(&workspace.join(LOCK_FILE))?;
-    let subdir = Subdir::current().ok_or(CookError::UnsupportedPlatform)?;
+    let subdir = current_subdir()?;
     let skip = SkipList::new(&lock, environment, subdir)?;
     install_command(workspace, environment, &skip)
         .status()

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pixi_chef::bake::{BakeError, Pixi, bake};
+use pixi_chef::workspace::ScopeError;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -170,7 +171,10 @@ fn fails_for_an_environment_missing_from_the_lock() -> TestResult {
         "nope",
         &out.path().join("export"),
     );
-    assert!(matches!(result, Err(BakeError::UnknownEnvironment(_))));
+    assert!(matches!(
+        result,
+        Err(BakeError::Scope(ScopeError::UnknownEnvironment(_)))
+    ));
     Ok(())
 }
 
