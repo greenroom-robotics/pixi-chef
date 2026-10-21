@@ -21,5 +21,5 @@ The directory `prepare --into` places the manifest and lock at. Cook and bake bo
 _Avoid_: Recipe root, workspace dir
 
 **Export**:
-A tree laid out as a filesystem root that holds one installed environment, every source package's directory, the activation hook and the entrypoint, ready to copy onto a runtime image.
+A tree laid out as a filesystem root that holds one installed environment, every local source package's directory, the activation hook and the entrypoint, ready to copy onto a runtime image.
 _Avoid_: Bundle, pack, output
