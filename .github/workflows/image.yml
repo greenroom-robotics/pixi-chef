@@ -1,7 +1,7 @@
 name: image
 on:
-  push:
-    tags: ["pixi-chef@*"]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,6 +21,7 @@ env:
 
 jobs:
   binary:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.release.tag_name, 'pixi-chef@')
     permissions:
       contents: read
     strategy:
@@ -34,6 +35,10 @@ jobs:
             target: aarch64-unknown-linux-musl
     runs-on: ${{ matrix.runner }}
     steps:
+      - name: Require a pixi-chef release tag
+        run: |
+          case "$TAG" in pixi-chef@*) ;; *) echo "not a pixi-chef release tag: $TAG"; exit 1 ;; esac
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: refs/tags/${{ env.TAG }}
@@ -70,6 +75,10 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Require a pixi-chef release tag
+        run: |
+          case "$TAG" in pixi-chef@*) ;; *) echo "not a pixi-chef release tag: $TAG"; exit 1 ;; esac
+
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: refs/tags/${{ env.TAG }}
