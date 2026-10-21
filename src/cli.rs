@@ -30,7 +30,7 @@ enum Command {
         /// local path in the lock and every manifest-relative activation
         /// script must resolve the same from there as from the manifest's
         /// directory. Cook and bake both run in this directory, so
-        /// PIXI_PROJECT_ROOT is this directory at runtime.
+        /// `PIXI_PROJECT_ROOT` is this directory at runtime.
         #[arg(long)]
         into: Option<PathBuf>,
         /// Glob of extra files to copy from each source package directory.

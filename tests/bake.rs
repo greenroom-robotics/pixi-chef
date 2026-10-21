@@ -1,14 +1,17 @@
 #![allow(clippy::panic_in_result_fn)]
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pixi_chef::bake::{BakeError, bake};
+use pixi_chef::cook::cook;
 use pixi_chef::fs::EmptyDirError;
 use pixi_chef::pixi::Pixi;
+use pixi_chef::prepare::{Workspace, prepare};
 use pixi_chef::workspace::ScopeError;
 
 const HOST_SUBDIR_SELECTOR: &str = "unix";
@@ -289,7 +292,7 @@ fn missing_script_error(manifest_tail: &str) -> TestResult {
         &fake_pixi(true, HOOK_TAIL)?,
         &out.path().join("export"),
     );
-    let error = result.expect_err("bake must fail");
+    let error = result.err().ok_or("bake must fail")?;
     assert!(
         matches!(error, BakeError::MissingActivationScript { .. }),
         "{error}"
@@ -423,5 +426,80 @@ fn real_pixi_export_runs_through_the_entrypoint_without_system_bash() -> TestRes
     assert!(position(&tools) < position(&bin), "{path}");
     assert!(position(&tools).is_some(), "{path}");
     assert!(path.ends_with(":/runtime/bin"), "{path}");
+    Ok(())
+}
+
+type Stamps = BTreeMap<PathBuf, (u64, i64, i64)>;
+
+fn stamps(env: &Path) -> Result<Stamps, Box<dyn Error>> {
+    let mut stamps = Stamps::new();
+    let mut files = vec![env.join("bin/bash")];
+    for entry in fs::read_dir(env.join("conda-meta"))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "json") {
+            files.push(path);
+        }
+    }
+    for file in files {
+        let meta = fs::metadata(&file)?;
+        stamps.insert(file, (meta.ino(), meta.mtime(), meta.mtime_nsec()));
+    }
+    Ok(stamps)
+}
+
+#[test]
+fn real_pixi_into_variant_bakes_in_place_without_reinstalling_binary_packages() -> TestResult {
+    let repo = tempfile::tempdir()?;
+    copy_dir(&fixture("into_e2e"), repo.path())?;
+    let scratch = tempfile::tempdir()?;
+    let tree = scratch.path().join("tree");
+    let workspace = Workspace::new(
+        Path::new("variants/a/pixi.toml"),
+        Some(Path::new("variants/shared")),
+        repo.path(),
+    )?;
+    prepare(repo.path(), &workspace, &tree, &[])?;
+
+    let into = tree.join("variants/shared");
+    assert!(cook(&Pixi::default(), &into, "default")?.success());
+    let env = into.join(".pixi/envs/default");
+    let cooked = stamps(&env)?;
+    assert!(!cooked.is_empty());
+
+    copy_dir(repo.path(), &tree)?;
+    let export = scratch.path().join("export");
+    bake(&Pixi::default(), &into, "default", &export)?;
+
+    let baked = stamps(&env)?;
+    for (file, stamp) in &cooked {
+        assert_eq!(
+            baked.get(file),
+            Some(stamp),
+            "{} was reinstalled",
+            file.display()
+        );
+    }
+    assert!(
+        baked.len() > cooked.len(),
+        "hello was not installed by bake"
+    );
+
+    let hook = export.join("etc/profile.d/pixi-env.sh");
+    let entrypoint = fs::read_to_string(export.join("entrypoint.sh"))?
+        .replace("/etc/profile.d/pixi-env.sh", &hook.display().to_string());
+    let script = scratch.path().join("entrypoint.sh");
+    fs::write(&script, entrypoint)?;
+    let output = Command::new("/bin/sh")
+        .arg(&script)
+        .args(["/bin/sh", "-c", "echo $INTO_E2E_MARK; echo $AA"])
+        .env_clear()
+        .env("PATH", "/runtime/bin")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout)?, "active\nbar baz/aa\n");
     Ok(())
 }

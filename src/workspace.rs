@@ -226,9 +226,12 @@ impl Manifest {
                     table,
                 });
             }
-            let targets_key = format!("{prefix}target");
-            for (target, value) in child(scope, "target", &targets_key)?.into_iter().flatten() {
-                let target_key = format!("{targets_key}.{target}");
+            let target_tables_key = format!("{prefix}target");
+            for (target, value) in child(scope, "target", &target_tables_key)?
+                .into_iter()
+                .flatten()
+            {
+                let target_key = format!("{target_tables_key}.{target}");
                 let key = format!("{target_key}.activation");
                 if let Some(table) = child(as_table(value, &target_key)?, "activation", &key)? {
                     found.push(Activation {
