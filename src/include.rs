@@ -13,8 +13,10 @@ pub enum IncludeGlobError {
     Invalid(#[from] globset::Error),
 }
 
-/// A glob confined to a source package directory: relative, free of `..`,
-/// with `*` never crossing a `/`. A match on a directory matches every file below it.
+/// A glob confined to a source package directory: relative and free of `..`.
+///
+/// `*` does not cross a `/` within one match, but a match on a directory
+/// selects every file below it, so `*` alone selects the whole directory tree.
 #[derive(Debug, Clone)]
 pub struct IncludeGlob {
     pattern: String,

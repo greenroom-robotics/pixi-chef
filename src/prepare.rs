@@ -1,6 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -39,10 +39,6 @@ pub enum PrepareError {
         path: PathBuf,
         source: Box<ParseCondaLockError>,
     },
-    #[error(
-        "--into {into}: source package paths in the lock do not resolve to the same directories as from the manifest's directory"
-    )]
-    IntoMismatch { into: PathBuf },
     #[error("recipe path {0} would be written from two different files")]
     Collision(PathBuf),
     #[error("--include {0} matched no file in any source package")]
@@ -65,21 +61,63 @@ impl PrepareError {
     }
 }
 
-/// A directory inside the repo root to place the workspace manifest and lock at.
-#[must_use]
-#[derive(Debug, Clone)]
-pub struct IntoDir(RepoPath);
-
-impl IntoDir {
-    pub fn new(path: &Path, root: &Path) -> Result<Self, RepoPathError> {
-        RepoPath::new(path, root).map(Self)
-    }
+#[derive(Debug, thiserror::Error)]
+pub enum WorkspaceError {
+    #[error(transparent)]
+    Path(#[from] RepoPathError),
+    #[error("manifest {0} has no file name")]
+    NoFileName(PathBuf),
+    #[error(
+        "--into {into} must be a sibling of the manifest directory {manifest_dir}, so the paths in the manifest and lock resolve the same"
+    )]
+    IntoNotSibling {
+        into: PathBuf,
+        manifest_dir: PathBuf,
+    },
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PrepareOptions {
-    pub into: Option<IntoDir>,
-    pub include: Vec<IncludeGlob>,
+/// A workspace manifest and the directory it is placed at in the recipe.
+///
+/// The recipe directory is the manifest's own directory or a sibling of it,
+/// so every relative path in the manifest and lock resolves identically there.
+#[must_use]
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    manifest: RepoPath,
+    file_name: OsString,
+    recipe_dir: RepoPath,
+}
+
+impl Workspace {
+    pub fn new(manifest: &Path, into: Option<&Path>, root: &Path) -> Result<Self, WorkspaceError> {
+        let manifest = RepoPath::new(manifest, root)?;
+        let file_name = manifest
+            .file_name()
+            .ok_or_else(|| WorkspaceError::NoFileName(manifest.as_path().to_path_buf()))?
+            .to_owned();
+        let manifest_dir = manifest.parent();
+        let recipe_dir = match into {
+            None => manifest_dir,
+            Some(into) => {
+                let into = RepoPath::new(into, root)?;
+                let sibling = !into.is_root()
+                    && !manifest_dir.is_root()
+                    && into.parent() == manifest_dir.parent();
+                if into != manifest_dir && !sibling {
+                    return Err(WorkspaceError::IntoNotSibling {
+                        into: into.as_path().to_path_buf(),
+                        manifest_dir: manifest_dir.as_path().to_path_buf(),
+                    });
+                }
+                into
+            }
+        };
+        Ok(Self {
+            manifest,
+            file_name,
+            recipe_dir,
+        })
+    }
 }
 
 /// A directory that does not exist yet or exists and holds nothing.
@@ -118,80 +156,68 @@ impl Files {
     }
 }
 
-fn manifest_file_name(manifest: &RepoPath) -> &OsStr {
-    manifest.as_path().file_name().unwrap_or_default()
-}
-
 /// Maps each recipe path to the repo path it is copied from.
 struct Recipe {
-    files: BTreeMap<RepoPath, RepoPath>,
+    files: Files,
 }
 
 impl Recipe {
     fn gather(
         root: &Path,
-        manifest: &RepoPath,
-        options: &PrepareOptions,
+        workspace: &Workspace,
+        include: &[IncludeGlob],
     ) -> Result<Self, PrepareError> {
-        if !root.join(manifest.as_path()).is_file() {
+        if !root.join(workspace.manifest.as_path()).is_file() {
             return Err(PrepareError::MissingManifest(
-                manifest.as_path().to_path_buf(),
+                workspace.manifest.as_path().to_path_buf(),
             ));
         }
-        let manifest_dir = manifest.parent();
-        let source_lock = manifest_dir.join(Path::new(LOCK_FILE), root)?;
+        let source_lock = workspace
+            .manifest
+            .parent()
+            .join(Path::new(LOCK_FILE), root)?;
         let lock_path = root.join(source_lock.as_path());
         let lock = LockFile::from_path(&lock_path).map_err(|source| PrepareError::Lock {
             path: lock_path.clone(),
             source: Box::new(source),
         })?;
-        let source_dirs = source_dirs(&lock, &manifest_dir, root)?;
-
-        let workspace_dir = match &options.into {
-            Some(IntoDir(into)) => {
-                let from_into = source_dirs_from(&lock, into, root);
-                if from_into.ok().as_ref() != Some(&source_dirs) {
-                    return Err(PrepareError::IntoMismatch {
-                        into: into.as_path().to_path_buf(),
-                    });
-                }
-                into.clone()
-            }
-            None => manifest_dir,
-        };
 
         let mut files = Files::default();
         files.add(
-            workspace_dir.join(Path::new(manifest_file_name(manifest)), root)?,
-            manifest.clone(),
+            workspace
+                .recipe_dir
+                .join(Path::new(&workspace.file_name), root)?,
+            workspace.manifest.clone(),
         )?;
-        files.add(workspace_dir.join(Path::new(LOCK_FILE), root)?, source_lock)?;
+        files.add(
+            workspace.recipe_dir.join(Path::new(LOCK_FILE), root)?,
+            source_lock,
+        )?;
 
         let mut matched = BTreeSet::new();
-        for dir in source_dirs {
+        for dir in source_dirs(&lock, &workspace.manifest.parent(), root)? {
             if !root.join(dir.as_path()).is_dir() {
                 return Err(PrepareError::MissingSourceDir(dir.as_path().to_path_buf()));
             }
-            let found = metadata_files(&root.join(dir.as_path()), &options.include)?;
+            let found = metadata_files(root, &dir, include)?;
             matched.extend(found.matched);
             for relative in found.files {
                 let file = dir.join(&relative, root)?;
                 files.add(file.clone(), file)?;
             }
         }
-        if let Some((_, glob)) = options
-            .include
+        if let Some((_, glob)) = include
             .iter()
             .enumerate()
             .find(|(index, _)| !matched.contains(index))
         {
             return Err(PrepareError::UnmatchedInclude(glob.pattern().to_owned()));
         }
-        Ok(Self { files: files.0 })
+        Ok(Self { files })
     }
 
     fn write(&self, root: &Path, out: &EmptyDir) -> Result<(), PrepareError> {
-        for (file, source) in &self.files {
+        for (file, source) in &self.files.0 {
             let from = root.join(source.as_path());
             let to = out.0.join(file.as_path());
             if let Some(parent) = to.parent() {
@@ -208,29 +234,45 @@ struct Found {
     matched: BTreeSet<usize>,
 }
 
-fn metadata_files(dir: &Path, include: &[IncludeGlob]) -> Result<Found, PrepareError> {
+fn metadata_files(
+    root: &Path,
+    dir: &RepoPath,
+    include: &[IncludeGlob],
+) -> Result<Found, PrepareError> {
+    let dir_path = root.join(dir.as_path());
     let mut files: Vec<PathBuf> = METADATA_FILES
         .iter()
-        .filter(|name| dir.join(name).is_file())
+        .filter(|name| dir_path.join(name).is_file())
         .map(PathBuf::from)
         .collect();
     let mut matched = BTreeSet::new();
     if !include.is_empty() {
-        let walk = WalkBuilder::new(dir)
+        let walk = WalkBuilder::new(root)
             .hidden(false)
             .require_git(false)
             .follow_links(false)
-            .filter_entry(|entry| entry.file_name() != ".git")
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false)
+            .parents(false)
+            .filter_entry({
+                let dir_path = dir_path.clone();
+                move |entry| {
+                    entry.file_name() != ".git"
+                        && (entry.path().starts_with(&dir_path)
+                            || dir_path.starts_with(entry.path()))
+                }
+            })
             .build();
         for entry in walk {
             let entry = entry.map_err(|source| PrepareError::Walk {
-                path: dir.to_path_buf(),
+                path: dir_path.clone(),
                 source,
             })?;
             if !entry.file_type().is_some_and(|kind| kind.is_file()) {
                 continue;
             }
-            let Ok(relative) = entry.path().strip_prefix(dir) else {
+            let Ok(relative) = entry.path().strip_prefix(&dir_path) else {
                 continue;
             };
             for (index, glob) in include.iter().enumerate() {
@@ -245,14 +287,6 @@ fn metadata_files(dir: &Path, include: &[IncludeGlob]) -> Result<Found, PrepareE
 }
 
 fn source_dirs(
-    lock: &LockFile,
-    lock_dir: &RepoPath,
-    root: &Path,
-) -> Result<BTreeSet<RepoPath>, PrepareError> {
-    Ok(source_dirs_from(lock, lock_dir, root)?)
-}
-
-fn source_dirs_from(
     lock: &LockFile,
     lock_dir: &RepoPath,
     root: &Path,
@@ -277,12 +311,10 @@ fn source_location(package: &LockedPackage) -> Option<&UrlOrPath> {
 
 pub fn prepare(
     root: &Path,
-    manifest: &Path,
+    workspace: &Workspace,
     out: &Path,
-    options: &PrepareOptions,
+    include: &[IncludeGlob],
 ) -> Result<(), PrepareError> {
     let out = EmptyDir::new(out)?;
-    let manifest = RepoPath::new(manifest, root)?;
-    let recipe = Recipe::gather(root, &manifest, options)?;
-    recipe.write(root, &out)
+    Recipe::gather(root, workspace, include)?.write(root, &out)
 }

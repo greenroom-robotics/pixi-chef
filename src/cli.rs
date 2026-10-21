@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
 
 use crate::include::IncludeGlob;
-use crate::prepare::{IntoDir, PrepareOptions, prepare};
+use crate::prepare::{Workspace, prepare};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -22,8 +22,8 @@ enum Command {
         manifest: PathBuf,
         /// Directory to write the recipe into; must be absent or empty.
         out: PathBuf,
-        /// Directory, inside the current directory, to place the manifest and
-        /// lock at in the recipe. Source package paths resolve from here.
+        /// Directory, a sibling of the manifest's directory, to place the
+        /// manifest and lock at in the recipe.
         #[arg(long)]
         into: Option<PathBuf>,
         /// Glob of extra files to copy from each source package directory.
@@ -42,8 +42,8 @@ impl Cli {
                 include,
             } => {
                 let root = std::env::current_dir().wrap_err("reading current directory")?;
-                let into = into.map(|dir| IntoDir::new(&dir, &root)).transpose()?;
-                prepare(&root, &manifest, &out, &PrepareOptions { into, include })?;
+                let workspace = Workspace::new(&manifest, into.as_deref(), &root)?;
+                prepare(&root, &workspace, &out, &include)?;
                 Ok(())
             }
         }

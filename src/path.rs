@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +33,14 @@ impl RepoPath {
         } else {
             Self::normalized(&self.0.join(relative))
         }
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.0.as_os_str().is_empty()
+    }
+
+    pub fn file_name(&self) -> Option<&OsStr> {
+        self.0.file_name()
     }
 
     pub fn parent(&self) -> Self {
