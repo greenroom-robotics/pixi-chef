@@ -1,0 +1,12 @@
+[workspace]
+name = "bake_e2e"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+preview = ["pixi-build"]
+
+[dependencies]
+bash = "*"
+hello = { path = "hello" }
+
+[activation]
+scripts = ["hello/activate.sh"]

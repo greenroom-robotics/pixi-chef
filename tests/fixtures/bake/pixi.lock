@@ -1,6 +1,7 @@
 version: 7
 platforms:
 - name: linux-64
+- name: linux-aarch64
 environments:
   default:
     channels:
@@ -8,7 +9,12 @@ environments:
     packages:
       linux-64:
       - conda_source: app[aaaaaaaa] @ app
+      linux-aarch64:
+      - conda_source: app[bbbbbbbb] @ app
 packages:
 - conda_source: app[aaaaaaaa] @ app
   variants:
     target_platform: linux-64
+- conda_source: app[bbbbbbbb] @ app
+  variants:
+    target_platform: linux-aarch64

@@ -36,8 +36,19 @@ fn workspace() -> Result<tempfile::TempDir, Box<dyn Error>> {
     Ok(dir)
 }
 
-fn fake_pixi(dir: &Path, hook: &str) -> Result<Pixi, Box<dyn Error>> {
-    let script = dir.join("fake-pixi");
+struct Fake {
+    pixi: Pixi,
+    _dir: tempfile::TempDir,
+}
+
+fn fake_pixi(with_bash: bool, hook_tail: &str) -> Result<Fake, Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let script = dir.path().join("fake-pixi");
+    let bash = if with_bash {
+        "ln -s /bin/sh .pixi/envs/default/bin/bash"
+    } else {
+        ":"
+    };
     fs::write(
         &script,
         format!(
@@ -47,30 +58,39 @@ install)
     mkdir -p .pixi/envs/default/bin .pixi/task-cache
     printf '#!/bin/sh\necho "$PIXI_ENV_MARK"\n' > .pixi/envs/default/bin/hello
     chmod +x .pixi/envs/default/bin/hello
-    echo stale > .pixi/stray-file
+    {bash}
     ;;
 shell-hook)
-    printf '%s' '{hook}'
+    [ "$*" = "shell-hook --as-is --shell bash --frozen -e default" ] || exit 9
+    echo ignored > .pixi/.gitignore
+    printf 'export PATH="%s/.pixi/envs/default/bin:/host/bin"\n' "$PWD"
+    printf 'export PIXI_EXE=/host/pixi\n'
+    printf '{hook_tail}'
     ;;
 esac
 "#
         ),
     )?;
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
-    Ok(Pixi::at(script))
+    Ok(Fake {
+        pixi: Pixi::at(script),
+        _dir: dir,
+    })
 }
 
-const HOOK: &str = "export PIXI_ENV_MARK=active\n";
+const HOOK_TAIL: &str = "export PIXI_ENV_MARK=active\\n";
+
+fn run_bake(ws: &Path, fake: &Fake, export: &Path) -> Result<(), BakeError> {
+    bake(&fake.pixi, ws, "default", export)
+}
 
 #[test]
 fn leaves_only_envs_in_pixi_dir() -> TestResult {
     let ws = workspace()?;
-    let tools = tempfile::tempdir()?;
     let out = tempfile::tempdir()?;
-    bake(
-        &fake_pixi(tools.path(), HOOK)?,
+    run_bake(
         ws.path(),
-        "default",
+        &fake_pixi(true, HOOK_TAIL)?,
         &out.path().join("export"),
     )?;
     let names: Vec<_> = fs::read_dir(ws.path().join(".pixi"))?
@@ -81,32 +101,45 @@ fn leaves_only_envs_in_pixi_dir() -> TestResult {
 }
 
 #[test]
-fn empty_hook_is_a_failure() -> TestResult {
+fn empty_hook_is_a_failure_and_leaves_no_export() -> TestResult {
     let ws = workspace()?;
-    let tools = tempfile::tempdir()?;
     let out = tempfile::tempdir()?;
-    let result = bake(
-        &fake_pixi(tools.path(), " \n")?,
+    let export = out.path().join("export");
+    let dir = tempfile::tempdir()?;
+    let script = dir.path().join("pixi");
+    fs::write(
+        &script,
+        "#!/bin/sh\n[ \"$1\" = install ] && mkdir -p .pixi/envs/default/bin && ln -s /bin/sh .pixi/envs/default/bin/bash\nexit 0\n",
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    let result = bake(&Pixi::at(script), ws.path(), "default", &export);
+    assert!(matches!(result, Err(BakeError::EmptyHook(_))));
+    assert_eq!(fs::read_dir(out.path())?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn missing_bash_is_a_failure_naming_the_fix() -> TestResult {
+    let ws = workspace()?;
+    let out = tempfile::tempdir()?;
+    let result = run_bake(
         ws.path(),
-        "default",
+        &fake_pixi(false, HOOK_TAIL)?,
         &out.path().join("export"),
     );
-    assert!(matches!(result, Err(BakeError::EmptyHook(_))));
+    let error = result.expect_err("bake must fail");
+    assert!(matches!(error, BakeError::MissingBash(_)));
+    assert!(error.to_string().contains("add `bash`"));
+    assert_eq!(fs::read_dir(out.path())?.count(), 0);
     Ok(())
 }
 
 #[test]
 fn fails_when_export_is_not_empty() -> TestResult {
     let ws = workspace()?;
-    let tools = tempfile::tempdir()?;
     let out = tempfile::tempdir()?;
     fs::write(out.path().join("stale"), "")?;
-    let result = bake(
-        &fake_pixi(tools.path(), HOOK)?,
-        ws.path(),
-        "default",
-        out.path(),
-    );
+    let result = run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, out.path());
     assert!(matches!(result, Err(BakeError::ExportNotEmpty(_))));
     Ok(())
 }
@@ -126,17 +159,25 @@ fn fails_when_pixi_fails() -> TestResult {
 }
 
 #[test]
+fn fails_for_an_environment_missing_from_the_lock() -> TestResult {
+    let ws = workspace()?;
+    let out = tempfile::tempdir()?;
+    let result = bake(
+        &fake_pixi(true, HOOK_TAIL)?.pixi,
+        ws.path(),
+        "nope",
+        &out.path().join("export"),
+    );
+    assert!(matches!(result, Err(BakeError::UnknownEnvironment(_))));
+    Ok(())
+}
+
+#[test]
 fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
     let ws = workspace()?;
-    let tools = tempfile::tempdir()?;
     let out = tempfile::tempdir()?;
     let export = out.path().join("export");
-    bake(
-        &fake_pixi(tools.path(), HOOK)?,
-        ws.path(),
-        "default",
-        &export,
-    )?;
+    run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, &export)?;
 
     let real = ws.path().canonicalize()?;
     let rooted = |p: &Path| export.join(p.strip_prefix("/").unwrap_or(p));
@@ -144,14 +185,20 @@ fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
     assert!(!rooted(&real.join(".pixi/task-cache")).exists());
     assert!(rooted(&real.join("app/package.xml")).is_file());
     assert!(rooted(&real.join("app/src/main.cpp")).is_file());
+    let prefix = real.join(".pixi/envs/default");
     assert_eq!(
         fs::read_to_string(export.join("etc/profile.d/pixi-env.sh"))?,
-        HOOK
+        format!(
+            "export PATH=\"{}/bin:$PATH\"\nexport PIXI_ENV_MARK=active\n",
+            prefix.display()
+        )
     );
-    let entrypoint = fs::read_to_string(export.join("entrypoint.sh"))?;
     assert_eq!(
-        entrypoint,
-        "#!/bin/sh\n. /etc/profile.d/pixi-env.sh\nexec \"$@\"\n"
+        fs::read_to_string(export.join("entrypoint.sh"))?,
+        format!(
+            "#!/bin/sh\nexec '{}/bin/bash' -c '. /etc/profile.d/pixi-env.sh && exec \"$@\"' bash \"$@\"\n",
+            prefix.display()
+        )
     );
     assert_eq!(
         fs::metadata(export.join("entrypoint.sh"))?
@@ -164,22 +211,37 @@ fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
 }
 
 #[test]
-fn entrypoint_runs_a_command_with_the_environment_active() -> TestResult {
-    let ws = workspace()?;
-    let tools = tempfile::tempdir()?;
+fn root_source_package_does_not_pull_in_other_environments() -> TestResult {
+    let ws = tempfile::tempdir()?;
+    fs::write(ws.path().join("pixi.toml"), "")?;
+    fs::write(ws.path().join("package.xml"), "<package/>")?;
+    let lock = fs::read_to_string(fixture("bake").join("pixi.lock"))?.replace("@ app", "@ .");
+    fs::write(ws.path().join("pixi.lock"), lock)?;
+    fs::create_dir_all(ws.path().join(".pixi/envs/other"))?;
+    fs::write(ws.path().join(".pixi/envs/other/leak"), "")?;
     let out = tempfile::tempdir()?;
     let export = out.path().join("export");
-    bake(
-        &fake_pixi(tools.path(), HOOK)?,
-        ws.path(),
-        "default",
-        &export,
-    )?;
+    run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, &export)?;
+
+    let real = ws.path().canonicalize()?;
+    let rooted = |p: &Path| export.join(p.strip_prefix("/").unwrap_or(p));
+    assert!(rooted(&real.join("package.xml")).is_file());
+    assert!(rooted(&real.join(".pixi/envs/default/bin/hello")).is_file());
+    assert!(!rooted(&real.join(".pixi/envs/other")).exists());
+    Ok(())
+}
+
+#[test]
+fn entrypoint_runs_a_command_with_the_environment_active() -> TestResult {
+    let ws = workspace()?;
+    let out = tempfile::tempdir()?;
+    let export = out.path().join("export");
+    run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, &export)?;
 
     let hook = export.join("etc/profile.d/pixi-env.sh");
     let entrypoint = fs::read_to_string(export.join("entrypoint.sh"))?
         .replace("/etc/profile.d/pixi-env.sh", &hook.display().to_string());
-    let script = tools.path().join("entrypoint.sh");
+    let script = out.path().join("entrypoint.sh");
     fs::write(&script, entrypoint)?;
     let output = Command::new("/bin/sh")
         .arg(&script)
@@ -189,6 +251,37 @@ fn entrypoint_runs_a_command_with_the_environment_active() -> TestResult {
         .env_clear()
         .output()?;
     assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "active\n");
+    Ok(())
+}
+
+#[test]
+fn real_pixi_export_runs_through_the_entrypoint_without_system_bash() -> TestResult {
+    let ws = tempfile::tempdir()?;
+    copy_dir(&fixture("bake_e2e"), ws.path())?;
+    let out = tempfile::tempdir()?;
+    let export = out.path().join("export");
+    bake(&Pixi::default(), ws.path(), "default", &export)?;
+    let names: Vec<_> = fs::read_dir(ws.path().join(".pixi"))?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(names, ["envs"]);
+
+    let hook = export.join("etc/profile.d/pixi-env.sh");
+    let entrypoint = fs::read_to_string(export.join("entrypoint.sh"))?
+        .replace("/etc/profile.d/pixi-env.sh", &hook.display().to_string());
+    let script = out.path().join("entrypoint.sh");
+    fs::write(&script, entrypoint)?;
+    let output = Command::new("/bin/sh")
+        .arg(&script)
+        .args(["/bin/sh", "-c", "echo $BAKE_E2E_MARK"])
+        .env_clear()
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(String::from_utf8(output.stdout)?, "active\n");
     Ok(())
 }

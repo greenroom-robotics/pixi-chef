@@ -1215,6 +1215,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "insta",
+ "rattler_conda_types",
  "rattler_lock",
  "tempfile",
  "thiserror 2.0.21",

@@ -6,6 +6,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
+use rattler_conda_types::Subdir;
 use rattler_lock::{
     CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
 };
@@ -13,7 +14,6 @@ use rattler_lock::{
 const LOCK_FILE: &str = "pixi.lock";
 const HOOK_PATH: &str = "etc/profile.d/pixi-env.sh";
 const ENTRYPOINT_PATH: &str = "entrypoint.sh";
-const ENTRYPOINT: &str = "#!/bin/sh\n. /etc/profile.d/pixi-env.sh\nexec \"$@\"\n";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {
@@ -23,6 +23,14 @@ pub enum BakeError {
     MissingSourceDir(PathBuf),
     #[error("environment {0} was not installed")]
     MissingEnvironment(PathBuf),
+    #[error("environment {0} has no bin/bash; add `bash` to the workspace dependencies")]
+    MissingBash(PathBuf),
+    #[error("environment {0} is not in the lock file")]
+    UnknownEnvironment(String),
+    #[error("environment {0} is not locked for this platform")]
+    NotLockedForPlatform(String),
+    #[error("this platform has no conda subdir")]
+    UnsupportedPlatform,
     #[error("`pixi shell-hook` printed nothing for environment {0}")]
     EmptyHook(String),
     #[error("`{command}` failed with {status}")]
@@ -47,41 +55,112 @@ impl BakeError {
     }
 }
 
-/// A shell hook with at least one non-whitespace character.
-struct ShellHook(String);
+/// An existing absolute path with symlinks resolved.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct AbsPath {
+    path: PathBuf,
+    below_root: PathBuf,
+}
 
-impl ShellHook {
-    fn new(env: &str, text: String) -> Result<Self, BakeError> {
-        if text.trim().is_empty() {
-            Err(BakeError::EmptyHook(env.to_string()))
-        } else {
-            Ok(Self(text))
-        }
+impl AbsPath {
+    fn new(path: &Path) -> Result<Self, BakeError> {
+        let path = path.canonicalize().map_err(BakeError::io(path))?;
+        let below_root = path
+            .strip_prefix("/")
+            .map_err(|_| BakeError::io(&path)(io::ErrorKind::InvalidInput.into()))?
+            .to_path_buf();
+        Ok(Self { path, below_root })
+    }
+
+    fn as_path(&self) -> &Path {
+        &self.path
+    }
+
+    fn starts_with(&self, other: &Self) -> bool {
+        self.path.starts_with(&other.path)
     }
 }
 
-/// A directory that does not exist yet or exists and holds nothing.
-struct EmptyDir(PathBuf);
+/// A shell hook that sets up the environment on top of the runtime `PATH`.
+struct ShellHook(String);
 
-impl EmptyDir {
-    fn new(path: &Path) -> Result<Self, BakeError> {
-        match fs::read_dir(path) {
+impl ShellHook {
+    fn new(env: &str, text: &str, prefix: &AbsPath) -> Result<Self, BakeError> {
+        if text.trim().is_empty() {
+            return Err(BakeError::EmptyHook(env.to_string()));
+        }
+        let rewritten: String = text
+            .lines()
+            .filter(|line| !line.starts_with("export PIXI_EXE="))
+            .map(|line| Self::relocate_path(line, prefix))
+            .flat_map(|line| [line, "\n".to_string()])
+            .collect();
+        Ok(Self(rewritten))
+    }
+
+    fn relocate_path(line: &str, prefix: &AbsPath) -> String {
+        let Some(value) = line
+            .strip_prefix("export PATH=\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        else {
+            return line.to_string();
+        };
+        let env_entries: Vec<&str> = value
+            .split(':')
+            .filter(|entry| Path::new(entry).starts_with(prefix.as_path()))
+            .collect();
+        format!("export PATH=\"{}:$PATH\"", env_entries.join(":"))
+    }
+}
+
+/// An export being written next to its final location.
+struct Staging {
+    dir: AbsPath,
+    target: PathBuf,
+}
+
+impl Staging {
+    fn new(export: &Path) -> Result<Self, BakeError> {
+        let target = std::path::absolute(export).map_err(BakeError::io(export))?;
+        match fs::read_dir(&target) {
             Ok(mut entries) => {
                 if entries.next().is_some() {
-                    return Err(BakeError::ExportNotEmpty(path.to_path_buf()));
+                    return Err(BakeError::ExportNotEmpty(target));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(BakeError::io(path)(e)),
+            Err(e) => return Err(BakeError::io(&target)(e)),
         }
-        fs::create_dir_all(path).map_err(BakeError::io(path))?;
-        let absolute = path.canonicalize().map_err(BakeError::io(path))?;
-        Ok(Self(absolute))
+        let name = target.file_name().unwrap_or_default().to_string_lossy();
+        let dir = target.with_file_name(format!(".{name}.partial"));
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(BakeError::io(&dir))?;
+        }
+        fs::create_dir_all(&dir).map_err(BakeError::io(&dir))?;
+        Ok(Self {
+            dir: AbsPath::new(&dir)?,
+            target,
+        })
     }
 
-    /// Where an absolute path of the build machine lands inside the export.
-    fn at(&self, absolute: &Path) -> PathBuf {
-        self.0.join(absolute.strip_prefix("/").unwrap_or(absolute))
+    /// Where a path of the build machine lands inside the export.
+    fn at(&self, path: &AbsPath) -> PathBuf {
+        self.dir.as_path().join(&path.below_root)
+    }
+
+    fn within(&self, relative: &str) -> PathBuf {
+        self.dir.as_path().join(relative)
+    }
+
+    fn publish(self) -> Result<(), BakeError> {
+        if self.target.is_dir() {
+            fs::remove_dir(&self.target).map_err(BakeError::io(&self.target))?;
+        }
+        fs::rename(self.dir.as_path(), &self.target).map_err(BakeError::io(&self.target))
+    }
+
+    fn discard(self) {
+        let _ = fs::remove_dir_all(self.dir.as_path());
     }
 }
 
@@ -146,29 +225,50 @@ impl Default for Pixi {
     }
 }
 
-fn source_dirs(workspace: &Path) -> Result<BTreeSet<PathBuf>, BakeError> {
-    let lock_path = workspace.join(LOCK_FILE);
+fn source_dirs(workspace: &AbsPath, env: &str) -> Result<Vec<AbsPath>, BakeError> {
+    let lock_path = workspace.as_path().join(LOCK_FILE);
     let lock = LockFile::from_path(&lock_path).map_err(|source| BakeError::Lock {
         path: lock_path,
         source: Box::new(source),
     })?;
+    let subdir = Subdir::current().ok_or(BakeError::UnsupportedPlatform)?;
+    let environment = lock
+        .environment(env)
+        .ok_or_else(|| BakeError::UnknownEnvironment(env.to_string()))?;
+    let mut platforms = environment
+        .packages_by_platform()
+        .filter(|(platform, _)| platform.subdir() == subdir)
+        .peekable();
+    if platforms.peek().is_none() {
+        return Err(BakeError::NotLockedForPlatform(env.to_string()));
+    }
     let mut dirs = BTreeSet::new();
-    for package in lock.packages() {
-        let location = match package {
-            LockedPackage::Conda(CondaPackageData::Source(source)) => Some(&source.location),
-            LockedPackage::Pypi(PypiPackageData::Source(source)) => Some(&*source.location),
-            LockedPackage::Conda(CondaPackageData::Binary(_))
-            | LockedPackage::Pypi(PypiPackageData::Distribution(_)) => None,
-        };
-        if let Some(UrlOrPath::Path(path)) = location {
-            let dir = workspace.join(path.as_str());
-            let dir = dir
-                .canonicalize()
-                .map_err(|_| BakeError::MissingSourceDir(dir))?;
-            dirs.insert(dir);
+    for (_, packages) in platforms {
+        for package in packages {
+            let location = match package {
+                LockedPackage::Conda(CondaPackageData::Source(source)) => Some(&source.location),
+                LockedPackage::Pypi(PypiPackageData::Source(source)) => Some(&*source.location),
+                LockedPackage::Conda(CondaPackageData::Binary(_))
+                | LockedPackage::Pypi(PypiPackageData::Distribution(_)) => None,
+            };
+            if let Some(UrlOrPath::Path(path)) = location {
+                let dir = workspace.as_path().join(path.as_str());
+                dirs.insert(AbsPath::new(&dir).map_err(|_| BakeError::MissingSourceDir(dir))?);
+            }
         }
     }
-    Ok(dirs)
+    Ok(outermost(dirs))
+}
+
+/// Drops every directory that sits inside another one of the set.
+fn outermost(dirs: BTreeSet<AbsPath>) -> Vec<AbsPath> {
+    let mut kept: Vec<AbsPath> = Vec::new();
+    for dir in dirs {
+        if !kept.last().is_some_and(|outer| dir.starts_with(outer)) {
+            kept.push(dir);
+        }
+    }
+    kept
 }
 
 fn prune_pixi_dir(workspace: &Path) -> Result<(), BakeError> {
@@ -190,7 +290,7 @@ fn prune_pixi_dir(workspace: &Path) -> Result<(), BakeError> {
     Ok(())
 }
 
-fn copy_tree(from: &Path, to: &Path, skip: &Path) -> Result<(), BakeError> {
+fn copy_tree(from: &Path, to: &Path, skip: &[&Path]) -> Result<(), BakeError> {
     let metadata = fs::symlink_metadata(from).map_err(BakeError::io(from))?;
     let kind = metadata.file_type();
     if kind.is_symlink() {
@@ -201,7 +301,7 @@ fn copy_tree(from: &Path, to: &Path, skip: &Path) -> Result<(), BakeError> {
         for entry in fs::read_dir(from).map_err(BakeError::io(from))? {
             let entry = entry.map_err(BakeError::io(from))?;
             let path = entry.path();
-            if path.canonicalize().is_ok_and(|real| real == skip) {
+            if skip.contains(&path.as_path()) {
                 continue;
             }
             copy_tree(&path, &to.join(entry.file_name()), skip)?;
@@ -212,12 +312,12 @@ fn copy_tree(from: &Path, to: &Path, skip: &Path) -> Result<(), BakeError> {
     }
 }
 
-fn copy_into_export(export: &EmptyDir, absolute: &Path) -> Result<(), BakeError> {
-    let to = export.at(absolute);
+fn copy_into_export(export: &Staging, source: &AbsPath, skip: &[&Path]) -> Result<(), BakeError> {
+    let to = export.at(source);
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
     }
-    copy_tree(absolute, &to, &export.0)
+    copy_tree(source.as_path(), &to, skip)
 }
 
 fn write_file(path: &Path, content: &str, mode: u32) -> Result<(), BakeError> {
@@ -229,26 +329,62 @@ fn write_file(path: &Path, content: &str, mode: u32) -> Result<(), BakeError> {
 }
 
 pub fn bake(pixi: &Pixi, workspace: &Path, env: &str, export: &Path) -> Result<(), BakeError> {
-    let workspace = workspace.canonicalize().map_err(BakeError::io(workspace))?;
-    let export = EmptyDir::new(export)?;
-    let sources = source_dirs(&workspace)?;
+    let workspace = AbsPath::new(workspace)?;
+    let staging = Staging::new(export)?;
+    match assemble(pixi, &workspace, env, &staging) {
+        Ok(()) => staging.publish(),
+        Err(error) => {
+            staging.discard();
+            Err(error)
+        }
+    }
+}
 
-    pixi.run(&workspace, &["install", "--locked", "-e", env])?;
-    prune_pixi_dir(&workspace)?;
-    let hook_bytes = pixi.capture(&workspace, &["shell-hook", "--as-is", "-e", env])?;
-    let hook = ShellHook::new(
-        env,
-        String::from_utf8(hook_bytes).map_err(|_| BakeError::HookNotUtf8)?,
+fn assemble(
+    pixi: &Pixi,
+    workspace: &AbsPath,
+    env: &str,
+    staging: &Staging,
+) -> Result<(), BakeError> {
+    let sources = source_dirs(workspace, env)?;
+    let work = workspace.as_path();
+
+    pixi.run(work, &["install", "--locked", "-e", env])?;
+    let env_dir = AbsPath::new(&work.join(".pixi/envs").join(env))
+        .map_err(|_| BakeError::MissingEnvironment(work.join(".pixi/envs").join(env)))?;
+    let bash = env_dir.as_path().join("bin/bash");
+    if !bash.is_file() {
+        return Err(BakeError::MissingBash(env_dir.as_path().to_path_buf()));
+    }
+    let hook_bytes = pixi.capture(
+        work,
+        &[
+            "shell-hook",
+            "--as-is",
+            "--shell",
+            "bash",
+            "--frozen",
+            "-e",
+            env,
+        ],
     )?;
+    let hook_text = String::from_utf8(hook_bytes).map_err(|_| BakeError::HookNotUtf8)?;
+    let hook = ShellHook::new(env, &hook_text, &env_dir)?;
 
-    let env_dir = workspace.join(".pixi/envs").join(env);
-    if !env_dir.is_dir() {
-        return Err(BakeError::MissingEnvironment(env_dir));
-    }
-    copy_into_export(&export, &env_dir)?;
+    let pixi_dir = work.join(".pixi");
+    let staged = staging.dir.as_path();
+    copy_into_export(staging, &env_dir, &[staged])?;
     for dir in &sources {
-        copy_into_export(&export, dir)?;
+        copy_into_export(staging, dir, &[staged, &pixi_dir])?;
     }
-    write_file(&export.0.join(HOOK_PATH), &hook.0, 0o644)?;
-    write_file(&export.0.join(ENTRYPOINT_PATH), ENTRYPOINT, 0o755)
+    write_file(&staging.within(HOOK_PATH), &hook.0, 0o644)?;
+    write_file(&staging.within(ENTRYPOINT_PATH), &entrypoint(&bash), 0o755)?;
+    prune_pixi_dir(work)
+}
+
+fn entrypoint(bash: &Path) -> String {
+    let bash = bash.to_string_lossy().replace('\'', "'\\''");
+    format!(
+        "#!/bin/sh\nexec '{bash}' -c '. /etc/profile.d/pixi-env.sh && exec \"$@\"' bash \"$@\"\n"
+    )
 }
