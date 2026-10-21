@@ -1,14 +1,14 @@
 # pixi-chef
 
-Splits a pixi workspace's container build into a dependency layer that only changes with the lock, and a source layer that changes with every edit.
+Splits a pixi workspace's container build into a dependency layer and a source layer, so editing source code does not reinstall the binary packages.
 
 - `prepare` writes the **recipe**: the manifest, the lock and the metadata of each **source package**.
-- `cook` installs the environment's **binary packages** from the recipe. Its layer is rebuilt only when the recipe changes.
+- `cook` installs the environment's **binary packages** from the recipe. Its layer can be reused while the recipe, the base image and pixi-chef are unchanged.
 - `bake` installs the **source packages** on top of the cooked layer and writes an **export** that can be copied onto a runtime image.
 
 ## Install
 
-On a workstation, with the Greenroom pixi fork and an `az login` session (see the Greenroom development docs, "Install" and "Auth"):
+On a workstation, with the Greenroom pixi fork, an `az login` session and a user-config grant for the `general` container (see the Install and Auth pages of the Greenroom platform docs: `website/docs_base/development/install.md` and `auth.md` in the platform repo):
 
 ```bash
 pixi global install \
@@ -17,7 +17,7 @@ pixi global install \
   pixi-chef
 ```
 
-In a Dockerfile, copy the binary from the image. It is a `scratch` image holding one static binary at `/pixi-chef`:
+In a Dockerfile, copy the binary from the image that `.github/workflows/image.yml` publishes. It is a `scratch` image holding one static binary at `/pixi-chef`:
 
 ```dockerfile
 COPY --from=ghcr.io/greenroom-robotics/pixi-chef:<version> /pixi-chef /usr/local/bin/pixi-chef
@@ -25,7 +25,7 @@ COPY --from=ghcr.io/greenroom-robotics/pixi-chef:<version> /pixi-chef /usr/local
 
 The `ghcr.io` package is private. Whoever builds the Dockerfile needs read access to it and must be logged in to `ghcr.io`.
 
-pixi-chef runs `pixi`, so `pixi` must be on `PATH` wherever `cook` or `bake` run.
+`cook` and `bake` run `pixi`, so `pixi` must be on `PATH` wherever they run.
 
 ## Language
 
@@ -43,8 +43,8 @@ Run from the repo root. Writes the recipe to `<out>`.
 
 - `<manifest>` must be a file named `pixi.toml` inside the current directory. The lock beside it must exist.
 - `<out>` must be absent or empty.
-- The recipe holds the manifest, `pixi.lock`, and, for each source package in the lock, the files of its directory that name it: `pixi.toml`, `pixi.lock`, `package.xml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `CMakeLists.txt` and `README.md`. Everything is at its real path.
-- The recipe depends only on those files, so editing source code does not change it.
+- The recipe holds the manifest, `pixi.lock`, and, for each source package in the lock, these files, when present in its directory: `pixi.toml`, `pixi.lock`, `package.xml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `CMakeLists.txt` and `README.md`. Everything is at its real path.
+- The recipe holds no source code, so editing source code does not change it.
 - `--into <dir>` places the manifest and lock at `<dir>` (a path inside the repo) instead of beside the manifest. It is accepted only when every lock path, activation script and `build-variants-files` path resolves to the same place from `<dir>` as from the manifest's directory. Otherwise it is an error naming the path.
 - `--include <glob>` copies more files from each source package directory into the recipe. It can be repeated. Globs are relative to the package directory:
   - `*` does not cross `/`; use `**` to cross directories.
@@ -53,7 +53,7 @@ Run from the repo root. Writes the recipe to `<out>`.
   - Absolute patterns and patterns containing `..` are rejected.
   - A glob that matches nothing is an error.
 
-Each source package's `pixi.toml` needs its own `[workspace]` table. pixi 0.82 rejects a package-only manifest that sits outside its workspace tree, and `prepare` does not copy ancestor workspace manifests.
+A source package whose directory is outside the manifest's directory needs its own `[workspace]` table in its `pixi.toml`, because `prepare` does not copy ancestor manifests.
 
 ### `pixi-chef cook -e <environment>`
 
@@ -67,8 +67,8 @@ Run in the directory holding the recipe with the real sources copied over it. In
 - The environment must include `bash`. `bake` fails otherwise.
 - The export holds, at their real paths: the environment, each source package's directory, and the activation scripts that the environment's hook sources.
 - It also holds `/etc/profile.d/pixi-env.sh`, the environment's activation hook, and `/entrypoint.sh`.
-- `/entrypoint.sh` is a `#!/bin/sh` script. It runs the environment's own `bash`, sources the hook, then execs its arguments. The runtime image needs no system `bash`.
-- `bake` fails when an activation script the manifest names is missing.
+- `/entrypoint.sh` is a `#!/bin/sh` script. It runs the environment's own `bash`, sources the hook, then execs its arguments. The runtime image needs `/bin/sh` and glibc, but no system `bash`. `FROM scratch` does not work.
+- `bake` fails when an activation script that the manifest names for that environment and platform is missing.
 
 Conda prefixes are absolute, so the workspace must sit at the same path in the build stages and in the runtime image. The examples use `/app`.
 
@@ -83,14 +83,23 @@ pixi-chef does not manage:
 
 ## Examples
 
-All examples build a workspace laid out as below. `pixi.lock` is committed and a `.dockerignore` lists `.pixi`.
+Unless an example says otherwise, it builds this workspace. `pixi.lock` is committed and a `.dockerignore` lists `.pixi`.
 
 ```
-pixi.toml        bash and hello = { path = "hello" }
+pixi.toml        depends on bash and hello = { path = "hello" }
 pixi.lock
-hello/pixi.toml  has its own [workspace] table
+hello/pixi.toml
 hello/pyproject.toml
 hello/hello/__init__.py
+```
+
+The named-environment and two-environment examples add `[environments]` to `pixi.toml`, with a `prod` environment and a `tools` environment whose feature adds `jq`. Both include the default feature, so both include `bash`. The `--into` example has its own layout.
+
+Every example takes the pixi-chef version as a build argument:
+
+```bash
+docker build --build-arg PIXI_CHEF_VERSION=<version> -t app .
+docker run --rm app <program>
 ```
 
 ### Minimal production image
@@ -122,11 +131,41 @@ WORKDIR /app
 ENTRYPOINT ["/entrypoint.sh"]
 ```
 
-The `cook` stage depends only on the recipe, so BuildKit reuses its layer until the manifest, the lock or a source package's metadata changes. Editing source code re-runs only `bake`.
+BuildKit reuses the `cook` layer while the recipe is byte-identical, and the base image and pixi-chef are unchanged. `prepare` re-runs on every source edit, but the recipe it writes does not change, so `cook` stays cached and only `bake` re-runs.
 
 ### Private channels
 
-Give `pixi` its credentials for `cook` (and `bake`) with a BuildKit secret, so they never enter a layer. Replace the `cook` stage of the minimal example:
+#### Greenroom `az://` channel
+
+`az://` channels need the Greenroom pixi fork; upstream pixi cannot resolve them. The fork reads its credential from Azure environment variables, and only for containers granted in the user-level (`~/.pixi/config.toml`) or system-level pixi config. A grant in the workspace's `.pixi/config.toml` is ignored. Pass the credential as an `env=` secret so it never enters a layer. Replace the `tools` and `cook` stages of the minimal example:
+
+```dockerfile
+FROM debian:bookworm-slim AS tools
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.80.1/install.sh | sh
+ENV PATH=/root/.pixi/bin:$PATH
+RUN printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\npublic = false\ngeneral = true\n' \
+    > /root/.pixi/config.toml
+COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
+
+FROM tools AS cook
+WORKDIR /app
+COPY --from=recipe /recipe .
+RUN --mount=type=secret,id=azure-sas,env=AZURE_STORAGE_SAS_TOKEN \
+    pixi-chef cook -e default
+```
+
+Add one `<container> = true` line per container the workspace uses (see the Greenroom Auth page). Repeat the `--mount` on the `bake` `RUN`. Service-principal credentials work the same way with `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID`.
+
+```bash
+docker build --build-arg PIXI_CHEF_VERSION=<version> --secret id=azure-sas,env=AZURE_STORAGE_SAS_TOKEN -t app .
+```
+
+#### HTTP channels
+
+For channels that use a bearer token or basic auth, mount a rattler authentication file and point `RATTLER_AUTH_FILE` at it. Replace the `cook` stage of the minimal example:
 
 ```dockerfile
 FROM tools AS cook
@@ -138,10 +177,10 @@ RUN --mount=type=secret,id=rattler-auth,target=/run/secrets/rattler-auth.json \
 ```
 
 ```bash
-docker build --secret id=rattler-auth,src=auth.json .
+docker build --build-arg PIXI_CHEF_VERSION=<version> --secret id=rattler-auth,src=auth.json -t app .
 ```
 
-`auth.json` is a rattler authentication file. Repeat the mount on the `bake` `RUN`. The base image's `pixi` must support your channel scheme: for the Greenroom `az://` channel that is the Greenroom pixi fork.
+Repeat the mount on the `bake` `RUN`.
 
 ### Named environment
 
@@ -194,7 +233,7 @@ Both exports write `/entrypoint.sh` and the hook at the same path, so only one e
 
 ### `--into`: one cook layer for many manifests
 
-When several manifests under `variants/` have the same dependencies, `--into` gives their recipes the same layout, so variants with the same lock share one `cook` layer. This needs every path in the manifest and lock to resolve the same from `variants/shared` as from `variants/<name>`, for example `../../common/hello`.
+When several manifests under `variants/` have the same dependencies, `--into` gives their recipes the same layout, so the `cook` layer is shared by the variants whose manifest, lock and recipe files are all byte-identical. This needs every path in the manifest and lock to resolve the same from `variants/shared` as from `variants/<name>`, for example `../../common/hello`.
 
 ```dockerfile
 # syntax=docker/dockerfile:1
