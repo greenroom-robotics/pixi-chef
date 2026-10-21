@@ -106,3 +106,50 @@ fn fails_when_source_directory_is_missing() -> TestResult {
     assert!(!recipe_dir.exists());
     Ok(())
 }
+
+fn repo_with(files: &[(&str, &str)]) -> Result<tempfile::TempDir, Box<dyn Error>> {
+    let repo = tempfile::tempdir()?;
+    for (name, content) in files {
+        fs::write(repo.path().join(name), content)?;
+    }
+    Ok(repo)
+}
+
+#[test]
+fn fails_when_manifest_is_missing() -> TestResult {
+    let repo = repo_with(&[])?;
+    let out = tempfile::tempdir()?;
+    let result = prepare(repo.path(), Path::new("pixi.toml"), &out.path().join("r"));
+    assert!(matches!(result, Err(PrepareError::MissingManifest(_))));
+    Ok(())
+}
+
+#[test]
+fn fails_when_lock_is_missing() -> TestResult {
+    let repo = repo_with(&[("pixi.toml", "")])?;
+    let out = tempfile::tempdir()?;
+    let result = prepare(repo.path(), Path::new("pixi.toml"), &out.path().join("r"));
+    assert!(matches!(result, Err(PrepareError::Lock { .. })));
+    Ok(())
+}
+
+#[test]
+fn fails_when_source_path_escapes_root() -> TestResult {
+    let lock =
+        fs::read_to_string(fixture("conda_source").join("pixi.lock"))?.replace("@ app", "@ ../app");
+    let repo = repo_with(&[("pixi.toml", ""), ("pixi.lock", &lock)])?;
+    let out = tempfile::tempdir()?;
+    let result = prepare(repo.path(), Path::new("pixi.toml"), &out.path().join("r"));
+    assert!(matches!(result, Err(PrepareError::Path(_))));
+    Ok(())
+}
+
+#[test]
+fn fails_when_out_is_a_file() -> TestResult {
+    let out = tempfile::tempdir()?;
+    let file = out.path().join("file");
+    fs::write(&file, "")?;
+    let result = prepare(&fixture("conda_source"), Path::new("pixi.toml"), &file);
+    assert!(result.is_err());
+    Ok(())
+}

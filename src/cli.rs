@@ -17,7 +17,7 @@ enum Command {
     /// Write the recipe for a workspace: its manifest, lock and the metadata
     /// files of every source package, at their real paths.
     Prepare {
-        /// Workspace manifest, relative to the current directory.
+        /// Workspace manifest, inside the current directory.
         manifest: PathBuf,
         /// Directory to write the recipe into; must be absent or empty.
         out: PathBuf,

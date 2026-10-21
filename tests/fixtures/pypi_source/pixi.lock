@@ -11,6 +11,5 @@ environments:
 packages:
 - pypi: lib
   name: lib
-  version: 0.1.0
   requires_python: '>=3.9'
   editable: true

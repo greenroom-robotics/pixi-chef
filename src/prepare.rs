@@ -3,11 +3,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use rattler_lock::{CondaPackageData, LockFile, LockedPackage, PypiPackageData, UrlOrPath};
+use rattler_lock::{
+    CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
+};
 
 use crate::path::{RepoPath, RepoPathError};
 
-pub const METADATA_FILES: [&str; 8] = [
+const METADATA_FILES: [&str; 8] = [
     "pixi.toml",
     "pixi.lock",
     "package.xml",
@@ -28,8 +30,11 @@ pub enum PrepareError {
     MissingSourceDir(PathBuf),
     #[error("manifest {0} does not exist")]
     MissingManifest(PathBuf),
-    #[error("reading lock file {path}: {message}")]
-    Lock { path: PathBuf, message: String },
+    #[error("reading lock file {path}: {source}")]
+    Lock {
+        path: PathBuf,
+        source: ParseCondaLockError,
+    },
     #[error(transparent)]
     Path(#[from] RepoPathError),
     #[error("{path}: {source}")]
@@ -75,9 +80,9 @@ impl Recipe {
         }
         let workspace_dir = manifest.parent();
         let lock_path = root.join(workspace_dir.as_path()).join(LOCK_FILE);
-        let lock = LockFile::from_path(&lock_path).map_err(|e| PrepareError::Lock {
+        let lock = LockFile::from_path(&lock_path).map_err(|source| PrepareError::Lock {
             path: lock_path.clone(),
-            message: e.to_string(),
+            source,
         })?;
 
         let mut files = BTreeSet::new();
@@ -117,15 +122,9 @@ fn source_dirs(
     root: &Path,
 ) -> Result<BTreeSet<RepoPath>, PrepareError> {
     let mut dirs = BTreeSet::new();
-    for (_, environment) in lock.environments() {
-        for (_, packages) in environment.packages_by_platform() {
-            for package in packages {
-                if let Some(location) = source_location(package)
-                    && let UrlOrPath::Path(path) = location
-                {
-                    dirs.insert(lock_dir.join(Path::new(path.as_str()), root)?);
-                }
-            }
+    for package in lock.packages() {
+        if let Some(UrlOrPath::Path(path)) = source_location(package) {
+            dirs.insert(lock_dir.join(Path::new(path.as_str()), root)?);
         }
     }
     Ok(dirs)

@@ -1,6 +1,6 @@
 ---
 source: tests/prepare.rs
-expression: "recipe(\"source_chain\", \"ws/pixi.toml\")"
+expression: "recipe(\"source_chain\", \"ws/pixi.toml\")?"
 ---
 === base/package.xml
 <package format="3">
@@ -38,13 +38,12 @@ environments:
     packages:
       linux-64:
       - conda_source: top[bbbbbbbb] @ ../top
-      - conda_source: base[cccccccc] @ ../base
 packages:
 - conda_source: top[bbbbbbbb] @ ../top
   variants:
     target_platform: linux-64
-  depends:
-  - base
+  host_packages:
+  - conda_source: base[cccccccc] @ ../base
 - conda_source: base[cccccccc] @ ../base
   variants:
     target_platform: linux-64
