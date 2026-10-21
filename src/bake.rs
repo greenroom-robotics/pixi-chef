@@ -12,7 +12,6 @@ use rattler_lock::{
 };
 
 const LOCK_FILE: &str = "pixi.lock";
-const EXPORT: &str = "export ";
 const EXPORT_PIXI_EXE: &str = "export PIXI_EXE=";
 const HOOK_PATH: &str = "etc/profile.d/pixi-env.sh";
 const ENTRYPOINT_PATH: &str = "entrypoint.sh";
@@ -108,22 +107,11 @@ impl ShellHook {
         if !text.contains(PATH_MARKER) {
             return Err(BakeError::HookIgnoresPath(env.to_string()));
         }
-        let lines: Vec<String> = text
+        let rewritten: String = text
             .lines()
             .filter(|line| !line.starts_with(EXPORT_PIXI_EXE))
-            .map(|line| line.replace(PATH_MARKER, "$PATH"))
+            .flat_map(|line| [line.replace(PATH_MARKER, "$PATH"), "\n".to_string()])
             .collect();
-        let mut rewritten = String::new();
-        for run in lines.chunk_by(|a, b| a.starts_with(EXPORT) == b.starts_with(EXPORT)) {
-            let mut run = run.to_vec();
-            if run.iter().all(|line| line.starts_with(EXPORT)) {
-                run.sort();
-            }
-            for line in run {
-                rewritten.push_str(&line);
-                rewritten.push('\n');
-            }
-        }
         Ok(Self(rewritten))
     }
 
@@ -242,7 +230,7 @@ impl Pixi {
             .into_iter()
             .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
             .map(|dir| dir.join(program))
-            .find(|candidate| candidate.is_file())
+            .find(|candidate| is_executable(candidate))
             .unwrap_or_else(|| program.to_path_buf())
     }
 
@@ -371,6 +359,11 @@ fn copy_into_export(export: &Staging, source: &AbsPath, skip: &[&Path]) -> Resul
         fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
     }
     copy_tree(source.as_path(), &to, skip)
+}
+
+fn is_executable(path: &Path) -> bool {
+    path.metadata()
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 fn copy_sourced_file(export: &Staging, file: &Path) -> Result<(), BakeError> {

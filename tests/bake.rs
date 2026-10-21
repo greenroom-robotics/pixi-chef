@@ -192,7 +192,7 @@ fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
     assert_eq!(
         fs::read_to_string(export.join("etc/profile.d/pixi-env.sh"))?,
         format!(
-            "export PATH=\"{}/bin:{}/tools:$PATH\"\nexport PIXI_ENV_MARK=active\nexport ZED=1\n. {}/act.sh\n",
+            "export PATH=\"{}/bin:{}/tools:$PATH\"\nexport ZED=1\nexport PIXI_ENV_MARK=active\n. {}/act.sh\n",
             prefix.display(),
             real.display(),
             real.display()
@@ -310,7 +310,7 @@ fn real_pixi_export_runs_through_the_entrypoint_without_system_bash() -> TestRes
     fs::write(&script, entrypoint)?;
     let output = Command::new("/bin/sh")
         .arg(&script)
-        .args(["/bin/sh", "-c", "echo $BAKE_E2E_MARK; echo $PATH"])
+        .args(["/bin/sh", "-c", "echo $BAKE_E2E_MARK; echo $AA; echo $PATH"])
         .env_clear()
         .env("PATH", "/runtime/bin")
         .output()?;
@@ -322,8 +322,15 @@ fn real_pixi_export_runs_through_the_entrypoint_without_system_bash() -> TestRes
     let stdout = String::from_utf8(output.stdout)?;
     let mut lines = stdout.lines();
     assert_eq!(lines.next(), Some("active"));
+    assert_eq!(lines.next(), Some("bar baz/aa"));
     let path = lines.next().unwrap_or_default();
-    assert!(path.contains("/tools:"), "{path}");
+    let entries: Vec<&str> = path.split(':').collect();
+    let root = ws.path().canonicalize()?;
+    let tools = root.join("tools");
+    let position = |suffix: &Path| entries.iter().position(|e| Path::new(e) == suffix);
+    let bin = root.join(".pixi/envs/default/bin");
+    assert!(position(&tools) < position(&bin), "{path}");
+    assert!(position(&tools).is_some(), "{path}");
     assert!(path.ends_with(":/runtime/bin"), "{path}");
     Ok(())
 }

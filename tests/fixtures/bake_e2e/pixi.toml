@@ -13,3 +13,5 @@ scripts = ["activate.sh"]
 
 [activation.env]
 PATH = "$PIXI_PROJECT_ROOT/tools:$PATH"
+FOO = "bar baz"
+AA = "$FOO/aa"
