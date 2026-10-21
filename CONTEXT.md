@@ -5,7 +5,7 @@ Splits a pixi workspace's container build into a dependency layer that only chan
 ## Language
 
 **Source package**:
-A lock entry built from a local directory rather than fetched as a built artifact.
+A lock entry built from source (a local directory, git or URL) rather than fetched as a built artifact.
 _Avoid_: Path dep, path package, local package
 
 **Binary package**:

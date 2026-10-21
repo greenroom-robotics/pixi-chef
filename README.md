@@ -29,7 +29,7 @@ The `ghcr.io` package is private. Whoever builds the Dockerfile needs read acces
 
 ## Language
 
-- **Source package**: a lock entry built from a local directory rather than fetched as a built artifact.
+- **Source package**: a lock entry built from source (a local directory, git or URL) rather than fetched as a built artifact.
 - **Binary package**: a lock entry installed from a built artifact, wherever that artifact lives, including a `.conda` file on local disk.
 - **Recipe**: the trimmed copy of a repo holding only the workspace manifest, its lock, and the metadata files of each source package, laid out at their real paths.
 - **Into directory**: the directory `prepare --into` places the manifest and lock at. `cook` and `bake` both run there, so `PIXI_PROJECT_ROOT` is that directory at runtime.

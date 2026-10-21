@@ -26,7 +26,7 @@ pub fn read_lock(path: &Path) -> Result<LockFile, LockError> {
     })
 }
 
-/// A lock entry built from a local directory, named as the lock records it.
+/// A lock entry built from source (a local directory, git or URL), named as the lock records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcePackage<'lock> {
     pub name: String,
