@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
 
-use crate::cook::cook;
+use crate::cook::{Termination, cook};
 use crate::prepare::prepare;
 
 #[derive(Parser, Debug)]
@@ -43,10 +43,7 @@ impl Cli {
             Command::Cook { environment } => {
                 let root = std::env::current_dir().wrap_err("reading current directory")?;
                 let status = cook(&root, &environment)?;
-                Ok(status
-                    .code()
-                    .and_then(|code| u8::try_from(code).ok())
-                    .map_or(ExitCode::FAILURE, ExitCode::from))
+                Ok(ExitCode::from(Termination::from(status).exit_byte()))
             }
         }
     }

@@ -8,7 +8,7 @@ preview = ["pixi-build"]
 tzdata = "*"
 
 [feature.conda.dependencies]
-app = { path = "app" }
+My_App = { path = "app" }
 
 [feature.py.pypi-dependencies]
 My_Lib = { path = "lib", editable = true }

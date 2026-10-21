@@ -2,23 +2,27 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
+use rattler_conda_types::Subdir;
 use rattler_lock::{
     CondaPackageData, Environment, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData,
 };
 
 const LOCK_FILE: &str = "pixi.lock";
+const MANIFEST_FILE: &str = "pixi.toml";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CookError {
-    #[error("reading lock file {path}: {source}")]
+    #[error("reading lock file {path}")]
     Lock {
         path: PathBuf,
         source: Box<ParseCondaLockError>,
     },
     #[error("environment {0} is not in the lock file")]
     UnknownEnvironment(String),
-    #[error("running pixi: {0}")]
-    Spawn(#[from] std::io::Error),
+    #[error("this platform has no conda subdir")]
+    UnsupportedPlatform,
+    #[error("running pixi")]
+    Spawn(#[source] std::io::Error),
 }
 
 /// Names of the source packages of one environment, spelled as the lock records them.
@@ -26,11 +30,11 @@ pub enum CookError {
 pub struct SkipList(BTreeSet<String>);
 
 impl SkipList {
-    pub fn new(lock: &LockFile, environment: &str) -> Result<Self, CookError> {
+    pub fn new(lock: &LockFile, environment: &str, subdir: Subdir) -> Result<Self, CookError> {
         let environment = lock
             .environment(environment)
             .ok_or_else(|| CookError::UnknownEnvironment(environment.to_owned()))?;
-        Ok(Self(source_names(&environment)))
+        Ok(Self(source_names(&environment, subdir)))
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -38,9 +42,10 @@ impl SkipList {
     }
 }
 
-fn source_names(environment: &Environment<'_>) -> BTreeSet<String> {
+fn source_names(environment: &Environment<'_>, subdir: Subdir) -> BTreeSet<String> {
     environment
         .packages_by_platform()
+        .filter(|(platform, _)| platform.subdir() == subdir)
         .flat_map(|(_, packages)| packages.filter_map(source_name).collect::<Vec<_>>())
         .collect()
 }
@@ -56,9 +61,14 @@ fn source_name(package: &LockedPackage) -> Option<String> {
     }
 }
 
-pub fn install_command(environment: &str, skip: &SkipList) -> Command {
+pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> Command {
     let mut command = Command::new("pixi");
-    command.args(["install", "--locked", "-e", environment]);
+    command
+        .arg("install")
+        .arg("--manifest-path")
+        .arg(workspace.join(MANIFEST_FILE))
+        .args(["--locked", "-e", environment]);
+    command.current_dir(workspace);
     for name in skip.names() {
         command.args(["--skip", name]);
     }
@@ -71,8 +81,34 @@ pub fn cook(workspace: &Path, environment: &str) -> Result<ExitStatus, CookError
         path: lock_path,
         source: Box::new(source),
     })?;
-    let skip = SkipList::new(&lock, environment)?;
-    Ok(install_command(environment, &skip)
-        .current_dir(workspace)
-        .status()?)
+    let subdir = Subdir::current().ok_or(CookError::UnsupportedPlatform)?;
+    let skip = SkipList::new(&lock, environment, subdir)?;
+    install_command(workspace, environment, &skip)
+        .status()
+        .map_err(CookError::Spawn)
+}
+
+/// How a process ended, reduced to what its exit code can carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    Code(i32),
+    Signal(i32),
+}
+
+impl From<ExitStatus> for Termination {
+    fn from(status: ExitStatus) -> Self {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .signal()
+            .map_or_else(|| Self::Code(status.code().unwrap_or(1)), Self::Signal)
+    }
+}
+
+impl Termination {
+    pub fn exit_byte(self) -> u8 {
+        match self {
+            Self::Code(code) => u8::try_from(code).unwrap_or(1),
+            Self::Signal(signal) => u8::try_from(signal.saturating_add(128)).unwrap_or(1),
+        }
+    }
 }

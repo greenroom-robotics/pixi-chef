@@ -6,9 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use pixi_chef::cook::{CookError, SkipList, cook, install_command};
+use pixi_chef::cook::{CookError, SkipList, Termination, cook, install_command};
 use pixi_chef::prepare::prepare;
-use rattler_lock::{CondaPackageData, LockFile, LockedPackage};
+use rattler_conda_types::Subdir;
+use rattler_lock::{CondaPackageData, LockFile, LockedPackage, PypiPackageData};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -18,12 +19,19 @@ fn fixture() -> PathBuf {
 
 fn skip_list(environment: &str) -> Result<SkipList, Box<dyn Error>> {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
-    Ok(SkipList::new(&lock, environment)?)
+    Ok(SkipList::new(&lock, environment, Subdir::Linux64)?)
 }
 
 fn rendered_command(environment: &str) -> Result<String, Box<dyn Error>> {
-    let command = install_command(environment, &skip_list(environment)?);
-    let args: Vec<_> = command.get_args().map(|a| a.to_string_lossy()).collect();
+    let workspace = fixture();
+    let command = install_command(&workspace, environment, &skip_list(environment)?);
+    let args: Vec<_> = command
+        .get_args()
+        .map(|a| {
+            a.to_string_lossy()
+                .replace(&*workspace.to_string_lossy(), "<workspace>")
+        })
+        .collect();
     Ok(format!(
         "{} {}",
         command.get_program().to_string_lossy(),
@@ -53,7 +61,7 @@ fn py_environment_skips_the_pypi_source_package_by_normalised_name() -> TestResu
 fn unknown_environment_is_an_error() -> TestResult {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     assert!(matches!(
-        SkipList::new(&lock, "nope"),
+        SkipList::new(&lock, "nope", Subdir::Linux64),
         Err(CookError::UnknownEnvironment(name)) if name == "nope"
     ));
     Ok(())
@@ -104,10 +112,58 @@ fn binary_packages(lock: &LockFile, environment: &str) -> Result<BTreeSet<String
         .collect())
 }
 
+fn installed_pypi(workspace: &Path, environment: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
+    let lib = workspace.join(".pixi/envs").join(environment).join("lib");
+    let mut names = BTreeSet::new();
+    if !lib.is_dir() {
+        return Ok(names);
+    }
+    for python in fs::read_dir(lib)? {
+        let site_packages = python?.path().join("site-packages");
+        if !site_packages.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(site_packages)? {
+            let file = entry?.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = file.strip_suffix(".dist-info") {
+                let name = stem.split('-').next().unwrap_or(stem);
+                names.insert(name.to_lowercase().replace('_', "-"));
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn locked_pypi(
+    lock: &LockFile,
+    environment: &str,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), Box<dyn Error>> {
+    let environment = lock.environment(environment).ok_or("environment missing")?;
+    let mut distributions = BTreeSet::new();
+    let mut sources = BTreeSet::new();
+    for (_, packages) in environment.packages_by_platform() {
+        for package in packages {
+            match package {
+                LockedPackage::Pypi(PypiPackageData::Distribution(d)) => {
+                    distributions.insert(d.name.to_string());
+                }
+                LockedPackage::Pypi(PypiPackageData::Source(s)) => {
+                    sources.insert(s.name.to_string());
+                }
+                LockedPackage::Conda(_) => {}
+            }
+        }
+    }
+    Ok((distributions, sources))
+}
+
 struct Cooked {
     status: ExitStatus,
     expected: BTreeSet<String>,
     installed: BTreeSet<String>,
+    pypi_distributions: BTreeSet<String>,
+    pypi_sources: BTreeSet<String>,
+    pypi_installed: BTreeSet<String>,
 }
 
 fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
@@ -116,12 +172,14 @@ fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
     prepare(&fixture(), Path::new("pixi.toml"), &recipe)?;
     let status = cook(&recipe, environment)?;
     let lock = LockFile::from_path(&recipe.join("pixi.lock"))?;
-    let expected = binary_packages(&lock, environment)?;
-    let installed = installed_packages(&recipe, environment).unwrap_or_default();
+    let (pypi_distributions, pypi_sources) = locked_pypi(&lock, environment)?;
     Ok(Cooked {
         status,
-        expected,
-        installed,
+        expected: binary_packages(&lock, environment)?,
+        installed: installed_packages(&recipe, environment)?,
+        pypi_distributions,
+        pypi_sources,
+        pypi_installed: installed_pypi(&recipe, environment)?,
     })
 }
 
@@ -131,6 +189,14 @@ fn cook_installs_every_binary_package_and_no_source_package() -> TestResult {
         let cooked = cooked(environment)?;
         assert!(cooked.status.success(), "{environment}");
         assert_eq!(cooked.installed, cooked.expected, "{environment}");
+        assert!(
+            cooked.pypi_distributions.is_subset(&cooked.pypi_installed),
+            "{environment}"
+        );
+        assert!(
+            cooked.pypi_sources.is_disjoint(&cooked.pypi_installed),
+            "{environment}"
+        );
     }
     Ok(())
 }
@@ -146,5 +212,62 @@ fn cook_propagates_a_failing_exit_status() -> TestResult {
     )?;
     let status = cook(&recipe, "default")?;
     assert!(!status.success());
+    Ok(())
+}
+
+#[test]
+fn exit_byte_passes_codes_through() {
+    assert_eq!(Termination::Code(0).exit_byte(), 0);
+    assert_eq!(Termination::Code(7).exit_byte(), 7);
+}
+
+#[test]
+fn exit_byte_maps_out_of_range_codes_to_failure() {
+    assert_eq!(Termination::Code(256).exit_byte(), 1);
+    assert_eq!(Termination::Code(-1).exit_byte(), 1);
+}
+
+#[test]
+fn exit_byte_maps_signals_to_128_plus_signal() {
+    assert_eq!(Termination::Signal(15).exit_byte(), 143);
+}
+
+#[test]
+fn termination_reads_codes_and_signals_from_exit_status() -> TestResult {
+    let code = std::process::Command::new("sh")
+        .args(["-c", "exit 7"])
+        .status()?;
+    assert_eq!(Termination::from(code), Termination::Code(7));
+    let signal = std::process::Command::new("sh")
+        .args(["-c", "kill -TERM $$"])
+        .status()?;
+    assert_eq!(Termination::from(signal), Termination::Signal(15));
+    Ok(())
+}
+
+fn run_binary_with_stub_pixi(script: &str) -> Result<Option<i32>, Box<dyn Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::tempdir()?;
+    let stub = bin.path().join("pixi");
+    fs::write(&stub, format!("#!/bin/sh\n{script}\n"))?;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755))?;
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_pixi-chef"))
+        .args(["cook", "-e", "default"])
+        .current_dir(fixture())
+        .env("PATH", bin.path())
+        .status()?;
+    Ok(status.code())
+}
+
+#[test]
+fn binary_exits_with_the_exit_code_of_pixi() -> TestResult {
+    assert_eq!(run_binary_with_stub_pixi("exit 0")?, Some(0));
+    assert_eq!(run_binary_with_stub_pixi("exit 42")?, Some(42));
+    Ok(())
+}
+
+#[test]
+fn binary_exits_128_plus_signal_when_pixi_is_killed() -> TestResult {
+    assert_eq!(run_binary_with_stub_pixi("kill -TERM $$")?, Some(143));
     Ok(())
 }

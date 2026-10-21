@@ -17,7 +17,7 @@ environments:
       - conda: https://prefix.dev/conda-forge/linux-64/libgomp-16.2.0-he0feb66_7.conda
       - conda: https://prefix.dev/conda-forge/linux-64/libstdcxx-16.2.0-h934c35e_7.conda
       - conda: https://prefix.dev/conda-forge/noarch/tzdata-2026c-h151e31d_0.conda
-      - conda_source: app[b9c0399c] @ app
+      - conda_source: my_app[b9c0399c] @ app
   default:
     channels:
     - url: https://prefix.dev/conda-forge/
@@ -715,7 +715,7 @@ packages:
   run_exports: {}
   size: 118849
   timestamp: 1784250406640
-- conda_source: app[b9c0399c] @ app
+- conda_source: my_app[b9c0399c] @ app
   variants:
     c_stdlib: sysroot
     c_stdlib_version: '2.28'
