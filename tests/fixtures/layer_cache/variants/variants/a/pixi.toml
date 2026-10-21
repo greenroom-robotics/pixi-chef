@@ -1,0 +1,10 @@
+[workspace]
+name = "variant_a"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+preview = ["pixi-build"]
+
+[dependencies]
+bash = "*"
+jq = "*"
+hello = { path = "../../common/hello" }
