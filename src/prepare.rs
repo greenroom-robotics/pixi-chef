@@ -34,11 +34,8 @@ pub enum PrepareError {
     MissingSourceDir(PathBuf),
     #[error("manifest {0} does not exist")]
     MissingManifest(PathBuf),
-    #[error("reading lock file {path}: {source}")]
-    Lock {
-        path: PathBuf,
-        source: Box<ParseCondaLockError>,
-    },
+    #[error(transparent)]
+    Lock(#[from] LockError),
     #[error("recipe path {0} would be written from two different files")]
     Collision(PathBuf),
     #[error("--include {0} matched no file in any source package")]
@@ -62,24 +59,52 @@ impl PrepareError {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error("reading lock file {path}: {source}")]
+pub struct LockError {
+    path: PathBuf,
+    source: Box<ParseCondaLockError>,
+}
+
+fn read_lock(path: &Path) -> Result<LockFile, LockError> {
+    LockFile::from_path(path).map_err(|source| LockError {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
     #[error(transparent)]
     Path(#[from] RepoPathError),
+    #[error(transparent)]
+    Lock(#[from] LockError),
     #[error("manifest {0} has no file name")]
     NoFileName(PathBuf),
     #[error(
-        "--into {into} must be a sibling of the manifest directory {manifest_dir}, so the paths in the manifest and lock resolve the same"
+        "--into {}: lock path {lock_path} resolves differently from there than from {}",
+        shown(.into),
+        shown(.manifest_dir)
     )]
-    IntoNotSibling {
+    IntoChangesPath {
         into: PathBuf,
         manifest_dir: PathBuf,
+        lock_path: String,
     },
+}
+
+fn shown(dir: &Path) -> String {
+    if dir.as_os_str().is_empty() {
+        ".".to_owned()
+    } else {
+        dir.display().to_string()
+    }
 }
 
 /// A workspace manifest and the directory it is placed at in the recipe.
 ///
-/// The recipe directory is the manifest's own directory or a sibling of it,
-/// so every relative path in the manifest and lock resolves identically there.
+/// The recipe directory is the manifest's own directory, or one from which
+/// every local path in the lock resolves to the same repo path as from the
+/// manifest's directory.
 #[must_use]
 #[derive(Debug, Clone)]
 pub struct Workspace {
@@ -100,14 +125,8 @@ impl Workspace {
             None => manifest_dir,
             Some(into) => {
                 let into = RepoPath::new(into, root)?;
-                let sibling = !into.is_root()
-                    && !manifest_dir.is_root()
-                    && into.parent() == manifest_dir.parent();
-                if into != manifest_dir && !sibling {
-                    return Err(WorkspaceError::IntoNotSibling {
-                        into: into.as_path().to_path_buf(),
-                        manifest_dir: manifest_dir.as_path().to_path_buf(),
-                    });
+                if into != manifest_dir {
+                    check_paths_resolve_alike(root, &manifest_dir, &into)?;
                 }
                 into
             }
@@ -117,6 +136,34 @@ impl Workspace {
             file_name,
             recipe_dir,
         })
+    }
+}
+
+fn check_paths_resolve_alike(
+    root: &Path,
+    manifest_dir: &RepoPath,
+    into: &RepoPath,
+) -> Result<(), WorkspaceError> {
+    let lock = read_lock(&root.join(manifest_dir.as_path()).join(LOCK_FILE))?;
+    for package in lock.packages() {
+        if let UrlOrPath::Path(path) = location(package) {
+            let relative = Path::new(path.as_str());
+            if manifest_dir.join(relative, root).ok() != into.join(relative, root).ok() {
+                return Err(WorkspaceError::IntoChangesPath {
+                    into: into.as_path().to_path_buf(),
+                    manifest_dir: manifest_dir.as_path().to_path_buf(),
+                    lock_path: path.to_string(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn location(package: &LockedPackage) -> &UrlOrPath {
+    match package {
+        LockedPackage::Conda(package) => package.location(),
+        LockedPackage::Pypi(package) => package.location(),
     }
 }
 
@@ -176,11 +223,7 @@ impl Recipe {
             .manifest
             .parent()
             .join(Path::new(LOCK_FILE), root)?;
-        let lock_path = root.join(source_lock.as_path());
-        let lock = LockFile::from_path(&lock_path).map_err(|source| PrepareError::Lock {
-            path: lock_path.clone(),
-            source: Box::new(source),
-        })?;
+        let lock = read_lock(&root.join(source_lock.as_path()))?;
 
         let mut files = Files::default();
         files.add(

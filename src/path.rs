@@ -35,10 +35,6 @@ impl RepoPath {
         }
     }
 
-    pub fn is_root(&self) -> bool {
-        self.0.as_os_str().is_empty()
-    }
-
     pub fn file_name(&self) -> Option<&OsStr> {
         self.0.file_name()
     }

@@ -253,30 +253,81 @@ fn prepare_in(
         .collect()
 }
 
-fn rejects_into(fixture_name: &str, manifest: &str, into: &'static str) {
-    let result = recipe_with(fixture_name, manifest, &Opts::into(into));
-    assert!(matches!(result, Err(e) if e.to_string().contains("must be a sibling")));
+fn sibling_repo(lock_path: &str) -> Result<tempfile::TempDir, Box<dyn Error>> {
+    let lock = fs::read_to_string(fixture("conda_source").join("pixi.lock"))?
+        .replace("@ app", &format!("@ {lock_path}"));
+    repo_with(&[
+        ("ws/pixi.toml", ""),
+        ("ws/pixi.lock", &lock),
+        ("app/package.xml", ""),
+        ("ws/sub/app/package.xml", ""),
+    ])
+}
+
+fn into_sibling_error(lock_path: &str) -> Result<String, Box<dyn Error>> {
+    let repo = sibling_repo(lock_path)?;
+    let out = tempfile::tempdir()?;
+    let result = run(
+        repo.path(),
+        "ws/pixi.toml",
+        &out.path().join("r"),
+        &Opts::into("shared"),
+    );
+    Ok(result.err().map(|e| e.to_string()).unwrap_or_default())
 }
 
 #[test]
-fn into_at_a_different_depth_is_rejected() {
-    rejects_into("local_binary", "pixi.toml", "some/where/else");
-    rejects_into("variants", "variants/base/pixi.toml", "deep/x/y");
-    rejects_into("variants", "variants/base/pixi.toml", "variants/base/inner");
-}
-
-#[test]
-fn into_at_a_sibling_keeps_a_local_binary_path_valid() -> TestResult {
-    let lock = fs::read_to_string(fixture("local_binary").join("pixi.lock"))?;
-    let repo = repo_with(&[("ws/pixi.toml", ""), ("ws/pixi.lock", &lock)])?;
-    let files = prepare_in(&repo, "ws/pixi.toml", &Opts::into("sibling"))?;
-    assert!(files.contains(&PathBuf::from("sibling/pixi.lock")));
+fn into_is_rejected_when_a_source_path_stays_inside_the_workspace() -> TestResult {
+    for lock_path in ["sub/app", ".", "./sub/app"] {
+        let message = into_sibling_error(lock_path)?;
+        assert!(
+            message.contains("--into shared") && message.contains(lock_path),
+            "{lock_path}: {message}"
+        );
+    }
     Ok(())
 }
 
 #[test]
-fn into_at_the_root_is_rejected_for_a_nested_manifest() {
-    rejects_into("variants", "variants/base/pixi.toml", ".");
+fn into_is_rejected_for_a_local_binary_path() -> TestResult {
+    let lock = fs::read_to_string(fixture("local_binary").join("pixi.lock"))?;
+    let repo = repo_with(&[("ws/pixi.toml", ""), ("ws/pixi.lock", &lock)])?;
+    let out = tempfile::tempdir()?;
+    let result = run(
+        repo.path(),
+        "ws/pixi.toml",
+        &out.path().join("r"),
+        &Opts::into("shared"),
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::Workspace(WorkspaceError::IntoChangesPath { .. }))
+    ));
+    Ok(())
+}
+
+#[test]
+fn into_is_rejected_at_a_different_depth_for_a_local_binary_path() {
+    let result = recipe_with("local_binary", "pixi.toml", &Opts::into("some/where/else"));
+    assert!(matches!(
+        result,
+        Err(e) if e.to_string().contains("--into some/where/else")
+    ));
+}
+
+#[test]
+fn into_at_a_sibling_accepts_a_lock_with_only_parent_relative_paths() -> TestResult {
+    let repo = sibling_repo("../app")?;
+    let files = prepare_in(&repo, "ws/pixi.toml", &Opts::into("shared"))?;
+    assert!(files.contains(&PathBuf::from("shared/pixi.lock")));
+    assert!(files.contains(&PathBuf::from("app/package.xml")));
+    Ok(())
+}
+
+#[test]
+fn into_error_shows_the_root_manifest_dir_as_a_dot() {
+    let result = recipe_with("conda_source", "pixi.toml", &Opts::into("elsewhere"));
+    assert!(matches!(result, Err(e) if e.to_string().contains("than from .")));
 }
 
 #[test]
@@ -424,7 +475,7 @@ fn fails_when_lock_is_missing() -> TestResult {
     );
     assert!(matches!(
         result,
-        Err(RunError::Prepare(PrepareError::Lock { .. }))
+        Err(RunError::Prepare(PrepareError::Lock(_)))
     ));
     Ok(())
 }
