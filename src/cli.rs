@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
-use globset::Glob;
 
-use crate::prepare::{PrepareOptions, prepare};
+use crate::include::IncludeGlob;
+use crate::prepare::{IntoDir, PrepareOptions, prepare};
 
 #[derive(Parser, Debug)]
 #[command(version, about)]
@@ -28,7 +28,7 @@ enum Command {
         into: Option<PathBuf>,
         /// Glob of extra files to copy from each source package directory.
         #[arg(long)]
-        include: Vec<Glob>,
+        include: Vec<IncludeGlob>,
     },
 }
 
@@ -42,6 +42,7 @@ impl Cli {
                 include,
             } => {
                 let root = std::env::current_dir().wrap_err("reading current directory")?;
+                let into = into.map(|dir| IntoDir::new(&dir, &root)).transpose()?;
                 prepare(&root, &manifest, &out, &PrepareOptions { into, include })?;
                 Ok(())
             }
