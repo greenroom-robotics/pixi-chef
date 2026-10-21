@@ -24,8 +24,9 @@ enum Command {
         manifest: PathBuf,
         /// Directory to write the recipe into; must be absent or empty.
         out: PathBuf,
-        /// Directory, a sibling of the manifest's directory, to place the
-        /// manifest and lock at in the recipe.
+        /// Directory to place the manifest and lock at in the recipe; every
+        /// local path in the lock must resolve the same from there as from
+        /// the manifest's directory.
         #[arg(long)]
         into: Option<PathBuf>,
         /// Glob of extra files to copy from each source package directory.
