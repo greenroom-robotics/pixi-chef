@@ -1,3 +1,4 @@
+pub mod bake;
 pub mod cli;
 pub mod cook;
 pub mod include;

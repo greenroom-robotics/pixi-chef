@@ -1,0 +1,14 @@
+[package]
+name = "hello"
+version = "0.1.0"
+
+[package.build.backend]
+name = "pixi-build-python"
+version = "*"
+
+[package.host-dependencies]
+hatchling = "*"
+python = "3.12.*"
+
+[package.run-dependencies]
+python = "3.12.*"

@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Result, WrapErr};
 
+use crate::bake::{Pixi, bake};
 use crate::cook::{Termination, cook};
 use crate::include::IncludeGlob;
 use crate::prepare::{Workspace, prepare};
@@ -39,6 +40,16 @@ enum Command {
         #[arg(short, long)]
         environment: String,
     },
+    /// Install an environment from the lock in the current directory and
+    /// write an export of it, with every source package, under a directory.
+    Bake {
+        /// Environment to install and export.
+        #[arg(short, long)]
+        env: String,
+        /// Directory to write the export into; must be absent or empty.
+        #[arg(long)]
+        export: PathBuf,
+    },
 }
 
 impl Cli {
@@ -59,6 +70,11 @@ impl Cli {
                 let root = std::env::current_dir().wrap_err("reading current directory")?;
                 let status = cook(&root, &environment)?;
                 Ok(ExitCode::from(Termination::from(status).exit_byte()))
+            }
+            Command::Bake { env, export } => {
+                let root = std::env::current_dir().wrap_err("reading current directory")?;
+                bake(&Pixi::default(), &root, &env, &export)?;
+                Ok(ExitCode::SUCCESS)
             }
         }
     }
