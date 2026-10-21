@@ -17,7 +17,7 @@ if [ -n "$reinstalled" ]; then
     exit 1
 fi
 
-stray=$(find /app -type d -name conda-meta -not -path "$PWD/*")
+stray=$(find / -xdev -type d -name conda-meta -not -path "$PWD/*" -not -path "/export/*" -not -path "$HOME/.cache/rattler/*")
 if [ -n "$stray" ]; then
     echo "environments created outside $PWD:" >&2
     echo "$stray" >&2

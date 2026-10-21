@@ -6,4 +6,5 @@ preview = ["pixi-build"]
 
 [dependencies]
 bash = "*"
+jq = "*"
 hello = { path = "../../common/hello" }

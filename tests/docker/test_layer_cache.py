@@ -7,11 +7,13 @@ import unittest
 import uuid
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE.parent / "fixtures" / "layer_cache"
 PIXI_CHEF = Path(os.environ["PIXI_CHEF_BIN"]).resolve()
+
+SUBPROCESS_TIMEOUT = 20 * 60
 
 STEP_HEADER = re.compile(r"^#(\d+) \[[^\]]+\] RUN (.*)$", re.MULTILINE)
 CACHED = re.compile(r"^#(\d+) CACHED$", re.MULTILINE)
@@ -28,8 +30,15 @@ class Scenario:
     manifest: str
     target: Target
     env: str = "default"
-    prepare_args: str = ""
-    workspace_dir: str = "."
+    into: PurePosixPath | None = None
+
+    @property
+    def prepare_args(self) -> str:
+        return "" if self.into is None else f"--into {self.into}"
+
+    @property
+    def workspace_dir(self) -> str:
+        return "." if self.into is None else str(self.into)
 
     @property
     def run_command(self) -> list[str]:
@@ -44,21 +53,27 @@ class Scenario:
 class BuildLog:
     text: str
 
-    def step_ids(self, command: str) -> list[str]:
-        return [
+    def step_ids(self, command: str) -> set[str]:
+        return {
             step for step, run in STEP_HEADER.findall(self.text) if command in run
-        ]
+        }
 
     def cached(self, command: str) -> bool:
         ids = self.step_ids(command)
-        assert len(ids) == 1, f"expected one `{command}` step, found {ids}"
-        return ids[0] in CACHED.findall(self.text)
+        if len(ids) != 1:
+            raise AssertionError(f"expected one `{command}` step, found {ids}")
+        return ids.pop() in CACHED.findall(self.text)
 
 
-def run(args: list[str | Path], **kwargs) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        args, check=True, text=True, capture_output=True, **kwargs
+def run(args: list[str | Path]) -> str:
+    result = subprocess.run(
+        args, text=True, capture_output=True, timeout=SUBPROCESS_TIMEOUT
     )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"{args} exited {result.returncode}\n{result.stdout}\n{result.stderr}"
+        )
+    return result.stdout
 
 
 class LayerCache:
@@ -66,7 +81,7 @@ class LayerCache:
         self.scenario = scenario
         self.root = root
         self.seed = uuid.uuid4().hex
-        self.tag = f"pixi-chef-test:{self.seed}"
+        self.tags: list[str] = []
         shutil.copytree(FIXTURES / scenario.fixture, root)
         self.chef_context = root.parent / "chef"
         self.chef_context.mkdir()
@@ -74,10 +89,12 @@ class LayerCache:
 
     def build(self) -> BuildLog:
         s = self.scenario
+        tag = f"pixi-chef-test:{uuid.uuid4().hex}"
+        self.tags.append(tag)
         result = subprocess.run(
             [
                 "docker", "buildx", "build", "--progress=plain", "--load",
-                "--tag", self.tag,
+                "--tag", tag,
                 "--target", s.target.value,
                 "--file", HERE / "Dockerfile",
                 "--build-context", f"chef={self.chef_context}",
@@ -91,6 +108,7 @@ class LayerCache:
             ],
             text=True,
             capture_output=True,
+            timeout=SUBPROCESS_TIMEOUT,
         )
         log = result.stdout + result.stderr
         if result.returncode != 0:
@@ -99,8 +117,8 @@ class LayerCache:
 
     def run_image(self) -> str:
         return run(
-            ["docker", "run", "--rm", self.tag, *self.scenario.run_command]
-        ).stdout
+            ["docker", "run", "--rm", self.tags[-1], *self.scenario.run_command]
+        )
 
     def edit_source(self) -> None:
         init = next(self.root.rglob("hello/hello/__init__.py"))
@@ -108,12 +126,17 @@ class LayerCache:
 
     def change_lock(self) -> None:
         manifest = self.root / self.scenario.manifest
-        text = manifest.read_text()
-        manifest.write_text(text.replace("[dependencies]\n", '[dependencies]\njq = "*"\n', 1))
-        run(["pixi", "lock", "--manifest-path", manifest])
+        before = manifest.read_bytes()
+        run(["pixi", "update", "--no-install", "--manifest-path", manifest, "jq"])
+        if manifest.read_bytes() != before:
+            raise AssertionError("updating the lock changed the manifest")
 
     def remove_image(self) -> None:
-        subprocess.run(["docker", "rmi", "--force", self.tag], capture_output=True)
+        subprocess.run(
+            ["docker", "rmi", "--force", *self.tags],
+            capture_output=True,
+            timeout=SUBPROCESS_TIMEOUT,
+        )
 
 
 COOK = "pixi-chef cook"
@@ -157,8 +180,7 @@ class Into(LayerCacheChecks, unittest.TestCase):
         "variants",
         "variants/a/pixi.toml",
         Target.RUNTIME,
-        prepare_args="--into variants/shared",
-        workspace_dir="variants/shared",
+        into=PurePosixPath("variants/shared"),
     )
 
 
