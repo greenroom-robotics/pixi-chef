@@ -12,6 +12,8 @@ use rattler_lock::{
 };
 
 const LOCK_FILE: &str = "pixi.lock";
+const EXPORT: &str = "export ";
+const EXPORT_PIXI_EXE: &str = "export PIXI_EXE=";
 const HOOK_PATH: &str = "etc/profile.d/pixi-env.sh";
 const ENTRYPOINT_PATH: &str = "entrypoint.sh";
 
@@ -31,6 +33,18 @@ pub enum BakeError {
     NotLockedForPlatform(String),
     #[error("this platform has no conda subdir")]
     UnsupportedPlatform,
+    #[error("`pixi shell-hook` output for environment {0} never used the host PATH marker")]
+    HookIgnoresPath(String),
+    #[error("hook sources {0}, which does not exist")]
+    MissingSourcedFile(PathBuf),
+    #[error("cannot move the export into {path}; is it a mount point? {source}")]
+    Publish { path: PathBuf, source: io::Error },
+    #[error("{error}; also failed to remove {path}: {cleanup}")]
+    Cleanup {
+        error: Box<Self>,
+        path: PathBuf,
+        cleanup: io::Error,
+    },
     #[error("`pixi shell-hook` printed nothing for environment {0}")]
     EmptyHook(String),
     #[error("`{command}` failed with {status}")]
@@ -81,40 +95,51 @@ impl AbsPath {
     }
 }
 
+const PATH_MARKER: &str = "PIXI_CHEF_HOST_PATH_MARKER_7f3a91c2";
+
 /// A shell hook that sets up the environment on top of the runtime `PATH`.
 struct ShellHook(String);
 
 impl ShellHook {
-    fn new(env: &str, text: &str, prefix: &AbsPath) -> Result<Self, BakeError> {
+    fn new(env: &str, text: &str) -> Result<Self, BakeError> {
         if text.trim().is_empty() {
             return Err(BakeError::EmptyHook(env.to_string()));
         }
-        let rewritten: String = text
+        if !text.contains(PATH_MARKER) {
+            return Err(BakeError::HookIgnoresPath(env.to_string()));
+        }
+        let lines: Vec<String> = text
             .lines()
-            .filter(|line| !line.starts_with("export PIXI_EXE="))
-            .map(|line| Self::relocate_path(line, prefix))
-            .flat_map(|line| [line, "\n".to_string()])
+            .filter(|line| !line.starts_with(EXPORT_PIXI_EXE))
+            .map(|line| line.replace(PATH_MARKER, "$PATH"))
             .collect();
+        let mut rewritten = String::new();
+        for run in lines.chunk_by(|a, b| a.starts_with(EXPORT) == b.starts_with(EXPORT)) {
+            let mut run = run.to_vec();
+            if run.iter().all(|line| line.starts_with(EXPORT)) {
+                run.sort();
+            }
+            for line in run {
+                rewritten.push_str(&line);
+                rewritten.push('\n');
+            }
+        }
         Ok(Self(rewritten))
     }
 
-    fn relocate_path(line: &str, prefix: &AbsPath) -> String {
-        let Some(value) = line
-            .strip_prefix("export PATH=\"")
-            .and_then(|rest| rest.strip_suffix('"'))
-        else {
-            return line.to_string();
-        };
-        let env_entries: Vec<&str> = value
-            .split(':')
-            .filter(|entry| Path::new(entry).starts_with(prefix.as_path()))
-            .collect();
-        format!("export PATH=\"{}:$PATH\"", env_entries.join(":"))
+    /// Absolute files the hook sources.
+    fn sourced_files(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.0
+            .lines()
+            .filter_map(|line| line.strip_prefix(". "))
+            .map(|path| PathBuf::from(path.trim().trim_matches(['"', '\''])))
+            .filter(|path| path.is_absolute())
     }
 }
 
-/// An export being written next to its final location.
+/// An export being written into a uniquely named directory next to its final location.
 struct Staging {
+    temp: tempfile::TempDir,
     dir: AbsPath,
     target: PathBuf,
 }
@@ -131,16 +156,16 @@ impl Staging {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(BakeError::io(&target)(e)),
         }
-        let name = target.file_name().unwrap_or_default().to_string_lossy();
-        let dir = target.with_file_name(format!(".{name}.partial"));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(BakeError::io(&dir))?;
-        }
-        fs::create_dir_all(&dir).map_err(BakeError::io(&dir))?;
-        Ok(Self {
-            dir: AbsPath::new(&dir)?,
-            target,
-        })
+        let parent = target.parent().unwrap_or_else(|| Path::new("/"));
+        fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
+        let temp = tempfile::Builder::new()
+            .prefix(".pixi-chef-export-")
+            .tempdir_in(parent)
+            .map_err(BakeError::io(parent))?;
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o755))
+            .map_err(BakeError::io(temp.path()))?;
+        let dir = AbsPath::new(temp.path())?;
+        Ok(Self { temp, dir, target })
     }
 
     /// Where a path of the build machine lands inside the export.
@@ -152,15 +177,24 @@ impl Staging {
         self.dir.as_path().join(relative)
     }
 
-    fn publish(self) -> Result<(), BakeError> {
-        if self.target.is_dir() {
-            fs::remove_dir(&self.target).map_err(BakeError::io(&self.target))?;
-        }
-        fs::rename(self.dir.as_path(), &self.target).map_err(BakeError::io(&self.target))
+    fn publish(&self) -> Result<(), BakeError> {
+        fs::rename(self.dir.as_path(), &self.target).map_err(|source| BakeError::Publish {
+            path: self.target.clone(),
+            source,
+        })
     }
 
-    fn discard(self) {
-        let _ = fs::remove_dir_all(self.dir.as_path());
+    fn discard(self, error: BakeError) -> BakeError {
+        let path = self.dir.as_path().to_path_buf();
+        match self.temp.close() {
+            Ok(()) => error,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => error,
+            Err(cleanup) => BakeError::Cleanup {
+                error: Box::new(error),
+                path,
+                cleanup,
+            },
+        }
     }
 }
 
@@ -199,10 +233,29 @@ impl Pixi {
         }
     }
 
-    fn capture(&self, workspace: &Path, args: &[&str]) -> Result<Vec<u8>, BakeError> {
+    fn resolved(&self) -> PathBuf {
+        let program = Path::new(&self.0);
+        if program.components().count() > 1 {
+            return program.to_path_buf();
+        }
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+            .unwrap_or_else(|| program.to_path_buf())
+    }
+
+    fn capture_with_marked_path(
+        &self,
+        workspace: &Path,
+        args: &[&str],
+    ) -> Result<Vec<u8>, BakeError> {
         let command = self.describe(args);
-        let output = self
-            .command(workspace, args)
+        let output = Command::new(self.resolved())
+            .args(args)
+            .current_dir(workspace)
+            .env("PATH", PATH_MARKER)
             .output()
             .map_err(|source| BakeError::Spawn {
                 command: command.clone(),
@@ -320,6 +373,23 @@ fn copy_into_export(export: &Staging, source: &AbsPath, skip: &[&Path]) -> Resul
     copy_tree(source.as_path(), &to, skip)
 }
 
+fn copy_sourced_file(export: &Staging, file: &Path) -> Result<(), BakeError> {
+    if !file.is_file() {
+        return Err(BakeError::MissingSourcedFile(file.to_path_buf()));
+    }
+    let to = export
+        .dir
+        .as_path()
+        .join(file.strip_prefix("/").unwrap_or(file));
+    if to.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
+    }
+    fs::copy(file, &to).map_err(BakeError::io(file)).map(drop)
+}
+
 fn write_file(path: &Path, content: &str, mode: u32) -> Result<(), BakeError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
@@ -331,12 +401,9 @@ fn write_file(path: &Path, content: &str, mode: u32) -> Result<(), BakeError> {
 pub fn bake(pixi: &Pixi, workspace: &Path, env: &str, export: &Path) -> Result<(), BakeError> {
     let workspace = AbsPath::new(workspace)?;
     let staging = Staging::new(export)?;
-    match assemble(pixi, &workspace, env, &staging) {
-        Ok(()) => staging.publish(),
-        Err(error) => {
-            staging.discard();
-            Err(error)
-        }
+    match assemble(pixi, &workspace, env, &staging).and_then(|()| staging.publish()) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(staging.discard(error)),
     }
 }
 
@@ -356,7 +423,7 @@ fn assemble(
     if !bash.is_file() {
         return Err(BakeError::MissingBash(env_dir.as_path().to_path_buf()));
     }
-    let hook_bytes = pixi.capture(
+    let hook_bytes = pixi.capture_with_marked_path(
         work,
         &[
             "shell-hook",
@@ -369,13 +436,16 @@ fn assemble(
         ],
     )?;
     let hook_text = String::from_utf8(hook_bytes).map_err(|_| BakeError::HookNotUtf8)?;
-    let hook = ShellHook::new(env, &hook_text, &env_dir)?;
+    let hook = ShellHook::new(env, &hook_text)?;
 
     let pixi_dir = work.join(".pixi");
     let staged = staging.dir.as_path();
     copy_into_export(staging, &env_dir, &[staged])?;
     for dir in &sources {
         copy_into_export(staging, dir, &[staged, &pixi_dir])?;
+    }
+    for file in hook.sourced_files() {
+        copy_sourced_file(staging, &file)?;
     }
     write_file(&staging.within(HOOK_PATH), &hook.0, 0o644)?;
     write_file(&staging.within(ENTRYPOINT_PATH), &entrypoint(&bash), 0o755)?;

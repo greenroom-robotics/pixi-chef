@@ -33,6 +33,7 @@ fn copy_dir(from: &Path, to: &Path) -> TestResult {
 fn workspace() -> Result<tempfile::TempDir, Box<dyn Error>> {
     let dir = tempfile::tempdir()?;
     copy_dir(&fixture("bake"), dir.path())?;
+    fs::write(dir.path().join("act.sh"), "export ACT=1\n")?;
     Ok(dir)
 }
 
@@ -63,9 +64,10 @@ install)
 shell-hook)
     [ "$*" = "shell-hook --as-is --shell bash --frozen -e default" ] || exit 9
     echo ignored > .pixi/.gitignore
-    printf 'export PATH="%s/.pixi/envs/default/bin:/host/bin"\n' "$PWD"
+    printf 'export PATH="%s/.pixi/envs/default/bin:%s/tools:%s"\n' "$PWD" "$PWD" "$PATH"
     printf 'export PIXI_EXE=/host/pixi\n'
     printf '{hook_tail}'
+    printf '. %s/act.sh\n' "$PWD"
     ;;
 esac
 "#
@@ -78,7 +80,7 @@ esac
     })
 }
 
-const HOOK_TAIL: &str = "export PIXI_ENV_MARK=active\\n";
+const HOOK_TAIL: &str = "export ZED=1\\nexport PIXI_ENV_MARK=active\\n";
 
 fn run_bake(ws: &Path, fake: &Fake, export: &Path) -> Result<(), BakeError> {
     bake(&fake.pixi, ws, "default", export)
@@ -185,12 +187,15 @@ fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
     assert!(!rooted(&real.join(".pixi/task-cache")).exists());
     assert!(rooted(&real.join("app/package.xml")).is_file());
     assert!(rooted(&real.join("app/src/main.cpp")).is_file());
+    assert!(rooted(&real.join("act.sh")).is_file());
     let prefix = real.join(".pixi/envs/default");
     assert_eq!(
         fs::read_to_string(export.join("etc/profile.d/pixi-env.sh"))?,
         format!(
-            "export PATH=\"{}/bin:$PATH\"\nexport PIXI_ENV_MARK=active\n",
-            prefix.display()
+            "export PATH=\"{}/bin:{}/tools:$PATH\"\nexport PIXI_ENV_MARK=active\nexport ZED=1\n. {}/act.sh\n",
+            prefix.display(),
+            real.display(),
+            real.display()
         )
     );
     assert_eq!(
@@ -211,10 +216,41 @@ fn export_holds_env_sources_hook_and_entrypoint_at_real_paths() -> TestResult {
 }
 
 #[test]
+fn leaves_unrelated_sibling_directories_alone_and_fills_an_empty_export() -> TestResult {
+    let ws = workspace()?;
+    let out = tempfile::tempdir()?;
+    let export = out.path().join("export");
+    let sibling = out.path().join(".export.partial");
+    fs::create_dir_all(&sibling)?;
+    fs::write(sibling.join("mine"), "")?;
+    fs::create_dir_all(&export)?;
+    run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, &export)?;
+    assert!(sibling.join("mine").is_file());
+    assert!(export.join("entrypoint.sh").is_file());
+    Ok(())
+}
+
+#[test]
+fn sourced_file_that_does_not_exist_is_a_failure() -> TestResult {
+    let ws = workspace()?;
+    fs::remove_file(ws.path().join("act.sh"))?;
+    let out = tempfile::tempdir()?;
+    let result = run_bake(
+        ws.path(),
+        &fake_pixi(true, HOOK_TAIL)?,
+        &out.path().join("export"),
+    );
+    assert!(matches!(result, Err(BakeError::MissingSourcedFile(_))));
+    assert_eq!(fs::read_dir(out.path())?.count(), 0);
+    Ok(())
+}
+
+#[test]
 fn root_source_package_does_not_pull_in_other_environments() -> TestResult {
     let ws = tempfile::tempdir()?;
     fs::write(ws.path().join("pixi.toml"), "")?;
     fs::write(ws.path().join("package.xml"), "<package/>")?;
+    fs::write(ws.path().join("act.sh"), "")?;
     let lock = fs::read_to_string(fixture("bake").join("pixi.lock"))?.replace("@ app", "@ .");
     fs::write(ws.path().join("pixi.lock"), lock)?;
     fs::create_dir_all(ws.path().join(".pixi/envs/other"))?;
@@ -274,14 +310,20 @@ fn real_pixi_export_runs_through_the_entrypoint_without_system_bash() -> TestRes
     fs::write(&script, entrypoint)?;
     let output = Command::new("/bin/sh")
         .arg(&script)
-        .args(["/bin/sh", "-c", "echo $BAKE_E2E_MARK"])
+        .args(["/bin/sh", "-c", "echo $BAKE_E2E_MARK; echo $PATH"])
         .env_clear()
+        .env("PATH", "/runtime/bin")
         .output()?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8(output.stdout)?, "active\n");
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout.lines();
+    assert_eq!(lines.next(), Some("active"));
+    let path = lines.next().unwrap_or_default();
+    assert!(path.contains("/tools:"), "{path}");
+    assert!(path.ends_with(":/runtime/bin"), "{path}");
     Ok(())
 }

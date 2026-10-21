@@ -9,4 +9,7 @@ bash = "*"
 hello = { path = "hello" }
 
 [activation]
-scripts = ["hello/activate.sh"]
+scripts = ["activate.sh"]
+
+[activation.env]
+PATH = "$PIXI_PROJECT_ROOT/tools:$PATH"
