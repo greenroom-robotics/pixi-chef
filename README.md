@@ -44,7 +44,7 @@ Run from the repo root. Writes the recipe to `<out>`.
 - `<manifest>` must be a file named `pixi.toml` inside the current directory. The lock beside it must exist.
 - `<out>` must be absent or empty.
 - The recipe holds the manifest, `pixi.lock`, and, for each source package in the lock, these files, when present in its directory: `pixi.toml`, `pixi.lock`, `package.xml`, `pyproject.toml`, `setup.py`, `setup.cfg`, `CMakeLists.txt` and `README.md`. Everything is at its real path.
-- The recipe holds no source code, so editing source code does not change it.
+- Unless `--include` adds them, the recipe holds no source files, so editing source code does not change it.
 - `--into <dir>` places the manifest and lock at `<dir>` (a path inside the repo) instead of beside the manifest. It is accepted only when every lock path, activation script and `build-variants-files` path resolves to the same place from `<dir>` as from the manifest's directory. Otherwise it is an error naming the path.
 - `--include <glob>` copies more files from each source package directory into the recipe. It can be repeated. Globs are relative to the package directory:
   - `*` does not cross `/`; use `**` to cross directories.
@@ -144,7 +144,7 @@ FROM debian:bookworm-slim AS tools
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.80.1/install.sh | sh
+RUN curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.82.1/install.sh | sh
 ENV PATH=/root/.pixi/bin:$PATH
 RUN printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\npublic = false\ngeneral = true\n' \
     > /root/.pixi/config.toml
@@ -157,7 +157,7 @@ RUN --mount=type=secret,id=azure-sas,env=AZURE_STORAGE_SAS_TOKEN \
     pixi-chef cook -e default
 ```
 
-Add one `<container> = true` line per container the workspace uses (see the Greenroom Auth page). Repeat the `--mount` on the `bake` `RUN`. Service-principal credentials work the same way with `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID`.
+Add one `<container> = true` line per container the workspace uses (see the Greenroom Auth page). Repeat the `--mount` on the `bake` `RUN`. The SAS token must cover every granted container (an account-level token), or use service-principal credentials instead, which work the same way with `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` and `AZURE_TENANT_ID`.
 
 ```bash
 docker build --build-arg PIXI_CHEF_VERSION=<version> --secret id=azure-sas,env=AZURE_STORAGE_SAS_TOKEN -t app .
@@ -204,7 +204,7 @@ ENTRYPOINT ["pixi", "run", "-e", "default"]
 ```
 
 ```bash
-docker build --target dev -t app-dev .
+docker build --build-arg PIXI_CHEF_VERSION=<version> --target dev -t app-dev .
 ```
 
 ### Two environments in one image
