@@ -17,6 +17,10 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cook")
 }
 
+fn current_subdir() -> Subdir {
+    Subdir::current().unwrap_or(Subdir::Linux64)
+}
+
 fn skip_list(environment: &str) -> Result<SkipList, Box<dyn Error>> {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     Ok(SkipList::new(&lock, environment, Subdir::Linux64)?)
@@ -99,6 +103,7 @@ fn binary_packages(lock: &LockFile, environment: &str) -> Result<BTreeSet<String
     let environment = lock.environment(environment).ok_or("environment missing")?;
     Ok(environment
         .packages_by_platform()
+        .filter(|(platform, _)| platform.subdir() == current_subdir())
         .flat_map(|(_, packages)| packages.collect::<Vec<_>>())
         .filter_map(|package| match package {
             LockedPackage::Conda(CondaPackageData::Binary(binary)) => Some(format!(
@@ -115,14 +120,18 @@ fn binary_packages(lock: &LockFile, environment: &str) -> Result<BTreeSet<String
 fn installed_pypi(workspace: &Path, environment: &str) -> Result<BTreeSet<String>, Box<dyn Error>> {
     let lib = workspace.join(".pixi/envs").join(environment).join("lib");
     let mut names = BTreeSet::new();
-    if !lib.is_dir() {
-        return Ok(names);
-    }
-    for python in fs::read_dir(lib)? {
-        let site_packages = python?.path().join("site-packages");
-        if !site_packages.is_dir() {
-            continue;
+    let mut pythons = Vec::new();
+    for entry in fs::read_dir(lib)? {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with("python") && entry.path().is_dir() {
+            pythons.push(entry.path());
         }
+    }
+    if pythons.is_empty() {
+        return Err("no python installed".into());
+    }
+    for python in pythons {
+        let site_packages = python.join("site-packages");
         for entry in fs::read_dir(site_packages)? {
             let file = entry?.file_name().to_string_lossy().into_owned();
             if let Some(stem) = file.strip_suffix(".dist-info") {
@@ -141,7 +150,10 @@ fn locked_pypi(
     let environment = lock.environment(environment).ok_or("environment missing")?;
     let mut distributions = BTreeSet::new();
     let mut sources = BTreeSet::new();
-    for (_, packages) in environment.packages_by_platform() {
+    for (_, packages) in environment
+        .packages_by_platform()
+        .filter(|(platform, _)| platform.subdir() == current_subdir())
+    {
         for package in packages {
             match package {
                 LockedPackage::Pypi(PypiPackageData::Distribution(d)) => {
@@ -163,7 +175,7 @@ struct Cooked {
     installed: BTreeSet<String>,
     pypi_distributions: BTreeSet<String>,
     pypi_sources: BTreeSet<String>,
-    pypi_installed: BTreeSet<String>,
+    pypi_installed: Option<BTreeSet<String>>,
 }
 
 fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
@@ -173,13 +185,19 @@ fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
     let status = cook(&recipe, environment)?;
     let lock = LockFile::from_path(&recipe.join("pixi.lock"))?;
     let (pypi_distributions, pypi_sources) = locked_pypi(&lock, environment)?;
+    let has_pypi = !pypi_distributions.is_empty() || !pypi_sources.is_empty();
+    let pypi_installed = if has_pypi {
+        Some(installed_pypi(&recipe, environment)?)
+    } else {
+        None
+    };
     Ok(Cooked {
         status,
         expected: binary_packages(&lock, environment)?,
         installed: installed_packages(&recipe, environment)?,
         pypi_distributions,
         pypi_sources,
-        pypi_installed: installed_pypi(&recipe, environment)?,
+        pypi_installed,
     })
 }
 
@@ -189,14 +207,14 @@ fn cook_installs_every_binary_package_and_no_source_package() -> TestResult {
         let cooked = cooked(environment)?;
         assert!(cooked.status.success(), "{environment}");
         assert_eq!(cooked.installed, cooked.expected, "{environment}");
-        assert!(
-            cooked.pypi_distributions.is_subset(&cooked.pypi_installed),
-            "{environment}"
-        );
-        assert!(
-            cooked.pypi_sources.is_disjoint(&cooked.pypi_installed),
-            "{environment}"
-        );
+        if let Some(installed) = &cooked.pypi_installed {
+            assert!(!cooked.pypi_distributions.is_empty(), "{environment}");
+            assert!(
+                cooked.pypi_distributions.is_subset(installed),
+                "{environment}"
+            );
+            assert!(cooked.pypi_sources.is_disjoint(installed), "{environment}");
+        }
     }
     Ok(())
 }
@@ -269,5 +287,29 @@ fn binary_exits_with_the_exit_code_of_pixi() -> TestResult {
 #[test]
 fn binary_exits_128_plus_signal_when_pixi_is_killed() -> TestResult {
     assert_eq!(run_binary_with_stub_pixi("kill -TERM $$")?, Some(143));
+    Ok(())
+}
+
+#[test]
+fn skip_list_only_covers_the_requested_platform() -> TestResult {
+    let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
+    let on = |subdir| -> Result<Vec<String>, Box<dyn Error>> {
+        Ok(SkipList::new(&lock, "conda", subdir)?
+            .names()
+            .map(str::to_owned)
+            .collect())
+    };
+    assert_eq!(on(Subdir::Linux64)?, ["my_app"]);
+    assert_eq!(on(Subdir::LinuxAarch64)?, [] as [std::string::String; 0]);
+    Ok(())
+}
+
+#[test]
+fn environment_without_the_platform_is_an_error() -> TestResult {
+    let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
+    assert!(matches!(
+        SkipList::new(&lock, "conda", Subdir::Osx64),
+        Err(CookError::NotLockedForPlatform(_))
+    ));
     Ok(())
 }

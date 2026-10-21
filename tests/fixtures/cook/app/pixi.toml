@@ -5,4 +5,4 @@ version = "0.1.0"
 [package.build.backend]
 channels = ["https://prefix.dev/pixi-build-backends", "https://prefix.dev/conda-forge"]
 name = "pixi-build-cmake"
-version = "==0.4.7.20261020.0845.d672751"
+version = "==0.4.7"

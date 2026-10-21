@@ -4,7 +4,7 @@ use std::process::{Command, ExitStatus};
 
 use rattler_conda_types::Subdir;
 use rattler_lock::{
-    CondaPackageData, Environment, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData,
+    CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, Platform, PypiPackageData,
 };
 
 const LOCK_FILE: &str = "pixi.lock";
@@ -19,6 +19,8 @@ pub enum CookError {
     },
     #[error("environment {0} is not in the lock file")]
     UnknownEnvironment(String),
+    #[error("environment {0} has no packages locked for this platform")]
+    NotLockedForPlatform(String),
     #[error("this platform has no conda subdir")]
     UnsupportedPlatform,
     #[error("running pixi")]
@@ -30,11 +32,18 @@ pub enum CookError {
 pub struct SkipList(BTreeSet<String>);
 
 impl SkipList {
-    pub fn new(lock: &LockFile, environment: &str, subdir: Subdir) -> Result<Self, CookError> {
+    pub fn new(lock: &LockFile, name: &str, subdir: Subdir) -> Result<Self, CookError> {
         let environment = lock
-            .environment(environment)
-            .ok_or_else(|| CookError::UnknownEnvironment(environment.to_owned()))?;
-        Ok(Self(source_names(&environment, subdir)))
+            .environment(name)
+            .ok_or_else(|| CookError::UnknownEnvironment(name.to_owned()))?;
+        let mut platforms = environment
+            .packages_by_platform()
+            .filter(|(platform, _)| platform.subdir() == subdir)
+            .peekable();
+        if platforms.peek().is_none() {
+            return Err(CookError::NotLockedForPlatform(name.to_owned()));
+        }
+        Ok(Self(source_names(platforms)))
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
@@ -42,10 +51,12 @@ impl SkipList {
     }
 }
 
-fn source_names(environment: &Environment<'_>, subdir: Subdir) -> BTreeSet<String> {
-    environment
-        .packages_by_platform()
-        .filter(|(platform, _)| platform.subdir() == subdir)
+fn source_names<'lock, P, I>(platforms: P) -> BTreeSet<String>
+where
+    P: Iterator<Item = (Platform<'lock>, I)>,
+    I: Iterator<Item = &'lock LockedPackage>,
+{
+    platforms
         .flat_map(|(_, packages)| packages.filter_map(source_name).collect::<Vec<_>>())
         .collect()
 }
@@ -88,7 +99,7 @@ pub fn cook(workspace: &Path, environment: &str) -> Result<ExitStatus, CookError
         .map_err(CookError::Spawn)
 }
 
-/// How a process ended, reduced to what its exit code can carry.
+/// How a process ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Termination {
     Code(i32),
