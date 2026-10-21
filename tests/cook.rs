@@ -300,7 +300,7 @@ fn skip_list_only_covers_the_requested_platform() -> TestResult {
             .collect())
     };
     assert_eq!(on(Subdir::Linux64)?, ["my_app"]);
-    assert_eq!(on(Subdir::LinuxAarch64)?, [] as [std::string::String; 0]);
+    assert_eq!(on(Subdir::LinuxAarch64)?, Vec::<String>::new());
     Ok(())
 }
 
