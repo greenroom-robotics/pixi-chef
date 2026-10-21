@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use pixi_chef::cook::{CookError, SkipList, Termination, cook, install_command};
-use pixi_chef::prepare::prepare;
+use pixi_chef::prepare::{Workspace, prepare};
 use rattler_conda_types::Subdir;
 use rattler_lock::{CondaPackageData, LockFile, LockedPackage, PypiPackageData};
 
@@ -169,6 +169,13 @@ fn locked_pypi(
     Ok((distributions, sources))
 }
 
+fn prepare_fixture(recipe: &Path) -> Result<(), Box<dyn Error>> {
+    let root = fixture();
+    let workspace = Workspace::new(Path::new("pixi.toml"), None, &root)?;
+    prepare(&root, &workspace, recipe, &[])?;
+    Ok(())
+}
+
 struct Cooked {
     status: ExitStatus,
     expected: BTreeSet<String>,
@@ -181,7 +188,7 @@ struct Cooked {
 fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
     let out = tempfile::tempdir()?;
     let recipe = out.path().join("recipe");
-    prepare(&fixture(), Path::new("pixi.toml"), &recipe)?;
+    prepare_fixture(&recipe)?;
     let status = cook(&recipe, environment)?;
     let lock = LockFile::from_path(&recipe.join("pixi.lock"))?;
     let (pypi_distributions, pypi_sources) = locked_pypi(&lock, environment)?;
@@ -223,7 +230,7 @@ fn cook_installs_every_binary_package_and_no_source_package() -> TestResult {
 fn cook_propagates_a_failing_exit_status() -> TestResult {
     let out = tempfile::tempdir()?;
     let recipe = out.path().join("recipe");
-    prepare(&fixture(), Path::new("pixi.toml"), &recipe)?;
+    prepare_fixture(&recipe)?;
     fs::write(
         recipe.join("pixi.toml"),
         "[workspace]\nname = \"other\"\nchannels = []\nplatforms = []\n",
