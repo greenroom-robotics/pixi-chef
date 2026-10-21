@@ -83,7 +83,7 @@ pixi-chef does not manage:
 
 ## Examples
 
-Unless an example says otherwise, it builds this workspace. `pixi.lock` is committed and a `.dockerignore` lists `.pixi`.
+Unless an example says otherwise, it builds this workspace. `pixi.lock` is committed and a `.dockerignore` lists `**/.pixi`.
 
 ```
 pixi.toml        depends on bash and hello = { path = "hello" }
