@@ -1,21 +1,20 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
+use std::ffi::OsStr;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
-use rattler_lock::{
-    CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
-};
+use rattler_lock::{LockFile, UrlOrPath};
 
 use crate::include::IncludeGlob;
 use crate::path::{RepoPath, RepoPathError};
+use crate::workspace::{LOCK_FILE, LockError, MANIFEST_FILE, SourcePackage, location, read_lock};
 
 const METADATA_FILES: [&str; 8] = [
-    "pixi.toml",
-    "pixi.lock",
+    MANIFEST_FILE,
+    LOCK_FILE,
     "package.xml",
     "pyproject.toml",
     "setup.py",
@@ -23,8 +22,6 @@ const METADATA_FILES: [&str; 8] = [
     "CMakeLists.txt",
     "README.md",
 ];
-
-const LOCK_FILE: &str = "pixi.lock";
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
@@ -59,27 +56,13 @@ impl PrepareError {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("reading lock file {path}: {source}")]
-pub struct LockError {
-    path: PathBuf,
-    source: Box<ParseCondaLockError>,
-}
-
-fn read_lock(path: &Path) -> Result<LockFile, LockError> {
-    LockFile::from_path(path).map_err(|source| LockError {
-        path: path.to_path_buf(),
-        source: Box::new(source),
-    })
-}
-
-#[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
     #[error(transparent)]
     Path(#[from] RepoPathError),
     #[error(transparent)]
     Lock(#[from] LockError),
-    #[error("manifest {0} has no file name")]
-    NoFileName(PathBuf),
+    #[error("manifest {0} must be named pixi.toml")]
+    NotPixiToml(PathBuf),
     #[error(
         "--into {}: lock path {lock_path} resolves differently from there than from {}",
         shown(.into),
@@ -109,17 +92,17 @@ fn shown(dir: &Path) -> String {
 #[derive(Debug, Clone)]
 pub struct Workspace {
     manifest: RepoPath,
-    file_name: OsString,
     recipe_dir: RepoPath,
 }
 
 impl Workspace {
     pub fn new(manifest: &Path, into: Option<&Path>, root: &Path) -> Result<Self, WorkspaceError> {
         let manifest = RepoPath::new(manifest, root)?;
-        let file_name = manifest
-            .file_name()
-            .ok_or_else(|| WorkspaceError::NoFileName(manifest.as_path().to_path_buf()))?
-            .to_owned();
+        if manifest.file_name() != Some(OsStr::new(MANIFEST_FILE)) {
+            return Err(WorkspaceError::NotPixiToml(
+                manifest.as_path().to_path_buf(),
+            ));
+        }
         let manifest_dir = manifest.parent();
         let recipe_dir = match into {
             None => manifest_dir,
@@ -133,7 +116,6 @@ impl Workspace {
         };
         Ok(Self {
             manifest,
-            file_name,
             recipe_dir,
         })
     }
@@ -158,13 +140,6 @@ fn check_paths_resolve_alike(
         }
     }
     Ok(())
-}
-
-fn location(package: &LockedPackage) -> &UrlOrPath {
-    match package {
-        LockedPackage::Conda(package) => package.location(),
-        LockedPackage::Pypi(package) => package.location(),
-    }
 }
 
 /// A directory that does not exist yet or exists and holds nothing.
@@ -227,9 +202,7 @@ impl Recipe {
 
         let mut files = Files::default();
         files.add(
-            workspace
-                .recipe_dir
-                .join(Path::new(&workspace.file_name), root)?,
+            workspace.recipe_dir.join(Path::new(MANIFEST_FILE), root)?,
             workspace.manifest.clone(),
         )?;
         files.add(
@@ -336,20 +309,15 @@ fn source_dirs(
 ) -> Result<BTreeSet<RepoPath>, RepoPathError> {
     let mut dirs = BTreeSet::new();
     for package in lock.packages() {
-        if let Some(UrlOrPath::Path(path)) = source_location(package) {
+        if let Some(SourcePackage {
+            location: UrlOrPath::Path(path),
+            ..
+        }) = SourcePackage::of(package)
+        {
             dirs.insert(lock_dir.join(Path::new(path.as_str()), root)?);
         }
     }
     Ok(dirs)
-}
-
-fn source_location(package: &LockedPackage) -> Option<&UrlOrPath> {
-    match package {
-        LockedPackage::Conda(CondaPackageData::Source(source)) => Some(&source.location),
-        LockedPackage::Pypi(PypiPackageData::Source(source)) => Some(&source.location),
-        LockedPackage::Conda(CondaPackageData::Binary(_))
-        | LockedPackage::Pypi(PypiPackageData::Distribution(_)) => None,
-    }
 }
 
 pub fn prepare(

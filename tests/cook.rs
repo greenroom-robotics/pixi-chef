@@ -76,7 +76,7 @@ fn missing_lock_is_an_error() -> TestResult {
     let dir = tempfile::tempdir()?;
     assert!(matches!(
         cook(dir.path(), "default"),
-        Err(CookError::Lock { .. })
+        Err(CookError::Lock(_))
     ));
     Ok(())
 }
@@ -173,6 +173,21 @@ fn prepare_fixture(recipe: &Path) -> Result<(), Box<dyn Error>> {
     let root = fixture();
     let workspace = Workspace::new(Path::new("pixi.toml"), None, &root)?;
     prepare(&root, &workspace, recipe, &[])?;
+    Ok(())
+}
+
+#[test]
+fn cook_command_targets_the_manifest_prepare_wrote() -> TestResult {
+    let out = tempfile::tempdir()?;
+    let recipe = out.path().join("recipe");
+    prepare_fixture(&recipe)?;
+    let command = install_command(&recipe, "default", &skip_list("default")?);
+    let args: Vec<_> = command.get_args().collect();
+    let position = args
+        .iter()
+        .position(|arg| *arg == "--manifest-path")
+        .ok_or("no --manifest-path")?;
+    assert!(Path::new(args[position + 1]).is_file());
     Ok(())
 }
 

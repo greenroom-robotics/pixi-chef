@@ -354,17 +354,19 @@ fn into_colliding_with_a_source_package_file_is_rejected() -> TestResult {
 }
 
 #[test]
-fn into_keeps_the_manifest_file_name() -> TestResult {
-    let lock =
-        fs::read_to_string(fixture("conda_source").join("pixi.lock"))?.replace("@ app", "@ ../app");
-    let repo = repo_with(&[
-        ("ws/pyproject.toml", ""),
-        ("ws/pixi.lock", &lock),
-        ("app/package.xml", ""),
-    ])?;
-    let files = prepare_in(&repo, "ws/pyproject.toml", &Opts::into("other"))?;
-    assert!(files.contains(&PathBuf::from("other/pyproject.toml")));
-    assert!(!files.contains(&PathBuf::from("other/pixi.toml")));
+fn manifest_not_named_pixi_toml_is_rejected() -> TestResult {
+    let repo = repo_with(&[("ws/pyproject.toml", ""), ("ws/pixi.lock", "")])?;
+    let out = tempfile::tempdir()?;
+    let result = run(
+        repo.path(),
+        "ws/pyproject.toml",
+        &out.path().join("r"),
+        &Opts::default(),
+    );
+    assert!(matches!(
+        result,
+        Err(RunError::Workspace(WorkspaceError::NotPixiToml(_)))
+    ));
     Ok(())
 }
 

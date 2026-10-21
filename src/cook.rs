@@ -1,22 +1,16 @@
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitStatus};
 
 use rattler_conda_types::Subdir;
-use rattler_lock::{
-    CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, Platform, PypiPackageData,
-};
+use rattler_lock::{LockFile, LockedPackage, Platform};
 
-const LOCK_FILE: &str = "pixi.lock";
-const MANIFEST_FILE: &str = "pixi.toml";
+use crate::workspace::{LOCK_FILE, LockError, MANIFEST_FILE, SourcePackage, read_lock};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CookError {
-    #[error("reading lock file {path}")]
-    Lock {
-        path: PathBuf,
-        source: Box<ParseCondaLockError>,
-    },
+    #[error(transparent)]
+    Lock(#[from] LockError),
     #[error("environment {0} is not in the lock file")]
     UnknownEnvironment(String),
     #[error("environment {0} has no packages locked for this platform")]
@@ -57,19 +51,12 @@ where
     I: Iterator<Item = &'lock LockedPackage>,
 {
     platforms
-        .flat_map(|(_, packages)| packages.filter_map(source_name).collect::<Vec<_>>())
+        .flat_map(|(_, packages)| {
+            packages
+                .filter_map(|package| SourcePackage::of(package).map(|source| source.name))
+                .collect::<Vec<_>>()
+        })
         .collect()
-}
-
-fn source_name(package: &LockedPackage) -> Option<String> {
-    match package {
-        LockedPackage::Conda(CondaPackageData::Source(source)) => {
-            Some(source.name().as_source().to_owned())
-        }
-        LockedPackage::Pypi(PypiPackageData::Source(source)) => Some(source.name.to_string()),
-        LockedPackage::Conda(CondaPackageData::Binary(_))
-        | LockedPackage::Pypi(PypiPackageData::Distribution(_)) => None,
-    }
 }
 
 pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> Command {
@@ -87,11 +74,7 @@ pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> 
 }
 
 pub fn cook(workspace: &Path, environment: &str) -> Result<ExitStatus, CookError> {
-    let lock_path = workspace.join(LOCK_FILE);
-    let lock = LockFile::from_path(&lock_path).map_err(|source| CookError::Lock {
-        path: lock_path,
-        source: Box::new(source),
-    })?;
+    let lock = read_lock(&workspace.join(LOCK_FILE))?;
     let subdir = Subdir::current().ok_or(CookError::UnsupportedPlatform)?;
     let skip = SkipList::new(&lock, environment, subdir)?;
     install_command(workspace, environment, &skip)
