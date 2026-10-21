@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use pixi_chef::fs::{EmptyDirError, MissingSourceDir};
 use pixi_chef::include::{IncludeGlob, IncludeGlobError};
 use pixi_chef::prepare::{PrepareError, Workspace, WorkspaceError, prepare};
 
@@ -180,7 +181,9 @@ fn fails_when_out_is_not_empty() -> TestResult {
     );
     assert!(matches!(
         result,
-        Err(RunError::Prepare(PrepareError::OutNotEmpty(_)))
+        Err(RunError::Prepare(PrepareError::OutDir(
+            EmptyDirError::NotEmpty(_)
+        )))
     ));
     Ok(())
 }
@@ -208,7 +211,7 @@ fn fails_when_source_directory_is_missing() -> TestResult {
     let recipe_dir = out.path().join("recipe");
     let result = run(repo.path(), "pixi.toml", &recipe_dir, &Opts::default());
     assert!(
-        matches!(result, Err(RunError::Prepare(PrepareError::MissingSourceDir(p))) if p == Path::new("app"))
+        matches!(result, Err(RunError::Prepare(PrepareError::MissingSourceDir(MissingSourceDir(p)))) if p == Path::new("app"))
     );
     assert!(!recipe_dir.exists());
     Ok(())

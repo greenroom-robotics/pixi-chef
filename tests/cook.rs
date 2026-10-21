@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use pixi_chef::cook::{CookError, SkipList, Termination, cook, install_command};
+use pixi_chef::pixi::Pixi;
 use pixi_chef::prepare::{Workspace, prepare};
 use pixi_chef::workspace::ScopeError;
 use rattler_conda_types::Subdir;
@@ -29,7 +30,12 @@ fn skip_list(environment: &str) -> Result<SkipList, Box<dyn Error>> {
 
 fn rendered_command(environment: &str) -> Result<String, Box<dyn Error>> {
     let workspace = fixture();
-    let command = install_command(&workspace, environment, &skip_list(environment)?);
+    let command = install_command(
+        &Pixi::default(),
+        &workspace,
+        environment,
+        &skip_list(environment)?,
+    );
     let args: Vec<_> = command
         .get_args()
         .map(|a| {
@@ -67,7 +73,7 @@ fn unknown_environment_is_an_error() -> TestResult {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     assert!(matches!(
         SkipList::new(&lock, "nope", Subdir::Linux64),
-        Err(CookError::Scope(ScopeError::UnknownEnvironment(name))) if name == "nope"
+        Err(ScopeError::UnknownEnvironment(name)) if name == "nope"
     ));
     Ok(())
 }
@@ -76,7 +82,7 @@ fn unknown_environment_is_an_error() -> TestResult {
 fn missing_lock_is_an_error() -> TestResult {
     let dir = tempfile::tempdir()?;
     assert!(matches!(
-        cook(dir.path(), "default"),
+        cook(&Pixi::default(), dir.path(), "default"),
         Err(CookError::Lock(_))
     ));
     Ok(())
@@ -182,7 +188,7 @@ fn cook_command_targets_the_manifest_prepare_wrote() -> TestResult {
     let out = tempfile::tempdir()?;
     let recipe = out.path().join("recipe");
     prepare_fixture(&recipe)?;
-    let command = install_command(&recipe, "default", &skip_list("default")?);
+    let command = install_command(&Pixi::default(), &recipe, "default", &skip_list("default")?);
     let args: Vec<_> = command.get_args().collect();
     let position = args
         .iter()
@@ -205,7 +211,7 @@ fn cooked(environment: &str) -> Result<Cooked, Box<dyn Error>> {
     let out = tempfile::tempdir()?;
     let recipe = out.path().join("recipe");
     prepare_fixture(&recipe)?;
-    let status = cook(&recipe, environment)?;
+    let status = cook(&Pixi::default(), &recipe, environment)?;
     let lock = LockFile::from_path(&recipe.join("pixi.lock"))?;
     let (pypi_distributions, pypi_sources) = locked_pypi(&lock, environment)?;
     let has_pypi = !pypi_distributions.is_empty() || !pypi_sources.is_empty();
@@ -251,7 +257,7 @@ fn cook_propagates_a_failing_exit_status() -> TestResult {
         recipe.join("pixi.toml"),
         "[workspace]\nname = \"other\"\nchannels = []\nplatforms = []\n",
     )?;
-    let status = cook(&recipe, "default")?;
+    let status = cook(&Pixi::default(), &recipe, "default")?;
     assert!(!status.success());
     Ok(())
 }
@@ -332,7 +338,7 @@ fn environment_without_the_platform_is_an_error() -> TestResult {
     let lock = LockFile::from_path(&fixture().join("pixi.lock"))?;
     assert!(matches!(
         SkipList::new(&lock, "conda", Subdir::Osx64),
-        Err(CookError::Scope(ScopeError::NotLockedForPlatform(_)))
+        Err(ScopeError::NotLockedForPlatform(_))
     ));
     Ok(())
 }

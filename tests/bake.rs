@@ -6,7 +6,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use pixi_chef::bake::{BakeError, Pixi, bake};
+use pixi_chef::bake::{BakeError, bake};
+use pixi_chef::fs::EmptyDirError;
+use pixi_chef::pixi::Pixi;
 use pixi_chef::workspace::ScopeError;
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -143,7 +145,10 @@ fn fails_when_export_is_not_empty() -> TestResult {
     let out = tempfile::tempdir()?;
     fs::write(out.path().join("stale"), "")?;
     let result = run_bake(ws.path(), &fake_pixi(true, HOOK_TAIL)?, out.path());
-    assert!(matches!(result, Err(BakeError::ExportNotEmpty(_))));
+    assert!(matches!(
+        result,
+        Err(BakeError::ExportDir(EmptyDirError::NotEmpty(_)))
+    ));
     Ok(())
 }
 
@@ -174,6 +179,27 @@ fn fails_for_an_environment_missing_from_the_lock() -> TestResult {
     assert!(matches!(
         result,
         Err(BakeError::Scope(ScopeError::UnknownEnvironment(_)))
+    ));
+    Ok(())
+}
+
+#[test]
+fn fails_for_an_environment_not_locked_for_this_platform() -> TestResult {
+    let ws = workspace()?;
+    let out = tempfile::tempdir()?;
+    fs::write(
+        ws.path().join("pixi.lock"),
+        "version: 7\nplatforms:\n- name: osx-64\nenvironments:\n  default:\n    channels:\n    - url: https://prefix.dev/conda-forge/\n    packages:\n      osx-64: []\npackages: []\n",
+    )?;
+    let result = bake(
+        &fake_pixi(true, HOOK_TAIL)?.pixi,
+        ws.path(),
+        "default",
+        &out.path().join("export"),
+    );
+    assert!(matches!(
+        result,
+        Err(BakeError::Scope(ScopeError::NotLockedForPlatform(_)))
     ));
     Ok(())
 }

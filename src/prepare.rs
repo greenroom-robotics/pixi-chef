@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use ignore::WalkBuilder;
 use rattler_lock::{LockFile, UrlOrPath};
 
+use crate::fs::{EmptyDir, EmptyDirError, MissingSourceDir};
 use crate::include::IncludeGlob;
 use crate::path::{RepoPath, RepoPathError};
 use crate::workspace::{LOCK_FILE, LockError, MANIFEST_FILE, SourcePackage, location, read_lock};
@@ -25,10 +26,10 @@ const METADATA_FILES: [&str; 8] = [
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
-    #[error("output directory {0} exists and is not empty")]
-    OutNotEmpty(PathBuf),
-    #[error("source package directory {0} does not exist")]
-    MissingSourceDir(PathBuf),
+    #[error(transparent)]
+    OutDir(#[from] EmptyDirError),
+    #[error(transparent)]
+    MissingSourceDir(#[from] MissingSourceDir),
     #[error("manifest {0} does not exist")]
     MissingManifest(PathBuf),
     #[error(transparent)]
@@ -37,14 +38,14 @@ pub enum PrepareError {
     Collision(PathBuf),
     #[error("--include {0} matched no file in any source package")]
     UnmatchedInclude(String),
-    #[error("walking {path}: {source}")]
+    #[error("walking {path}")]
     Walk {
         path: PathBuf,
         source: ignore::Error,
     },
     #[error(transparent)]
     Path(#[from] RepoPathError),
-    #[error("{path}: {source}")]
+    #[error("{path}")]
     Io { path: PathBuf, source: io::Error },
 }
 
@@ -142,24 +143,6 @@ fn check_paths_resolve_alike(
     Ok(())
 }
 
-/// A directory that does not exist yet or exists and holds nothing.
-struct EmptyDir(PathBuf);
-
-impl EmptyDir {
-    fn new(path: &Path) -> Result<Self, PrepareError> {
-        match fs::read_dir(path) {
-            Ok(mut entries) => {
-                if entries.next().is_some() {
-                    return Err(PrepareError::OutNotEmpty(path.to_path_buf()));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(PrepareError::io(path)(e)),
-        }
-        Ok(Self(path.to_path_buf()))
-    }
-}
-
 #[derive(Default)]
 struct Files(BTreeMap<RepoPath, RepoPath>);
 
@@ -213,7 +196,7 @@ impl Recipe {
         let mut matched = BTreeSet::new();
         for dir in source_dirs(&lock, &workspace.manifest.parent(), root)? {
             if !root.join(dir.as_path()).is_dir() {
-                return Err(PrepareError::MissingSourceDir(dir.as_path().to_path_buf()));
+                return Err(MissingSourceDir(dir.as_path().to_path_buf()).into());
             }
             let found = metadata_files(root, &dir, include)?;
             matched.extend(found.matched);
@@ -235,7 +218,7 @@ impl Recipe {
     fn write(&self, root: &Path, out: &EmptyDir) -> Result<(), PrepareError> {
         for (file, source) in &self.files.0 {
             let from = root.join(source.as_path());
-            let to = out.0.join(file.as_path());
+            let to = out.path().join(file.as_path());
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).map_err(PrepareError::io(parent))?;
             }

@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -8,6 +7,8 @@ use std::process::{Command, ExitStatus};
 
 use rattler_lock::UrlOrPath;
 
+use crate::fs::{EmptyDir, EmptyDirError, MissingSourceDir};
+use crate::pixi::Pixi;
 use crate::workspace::{
     LOCK_FILE, LockError, ScopeError, SourcePackage, current_subdir, read_lock, scoped_packages,
 };
@@ -18,10 +19,10 @@ const ENTRYPOINT_PATH: &str = "entrypoint.sh";
 
 #[derive(Debug, thiserror::Error)]
 pub enum BakeError {
-    #[error("export directory {0} exists and is not empty")]
-    ExportNotEmpty(PathBuf),
-    #[error("source package directory {0} does not exist")]
-    MissingSourceDir(PathBuf),
+    #[error(transparent)]
+    ExportDir(#[from] EmptyDirError),
+    #[error(transparent)]
+    MissingSourceDir(#[from] MissingSourceDir),
     #[error("environment {0} was not installed")]
     MissingEnvironment(PathBuf),
     #[error("environment {0} has no bin/bash; add `bash` to the workspace dependencies")]
@@ -32,7 +33,7 @@ pub enum BakeError {
     HookIgnoresPath(String),
     #[error("hook sources {0}, which does not exist")]
     MissingSourcedFile(PathBuf),
-    #[error("cannot move the export into {path}; is it a mount point? {source}")]
+    #[error("cannot move the export into {path}; is it a mount point?")]
     Publish { path: PathBuf, source: io::Error },
     #[error("{error}; also failed to remove {path}: {cleanup}")]
     Cleanup {
@@ -44,13 +45,13 @@ pub enum BakeError {
     EmptyHook(String),
     #[error("`{command}` failed with {status}")]
     CommandFailed { command: String, status: ExitStatus },
-    #[error("running `{command}`: {source}")]
+    #[error("running `{command}`")]
     Spawn { command: String, source: io::Error },
     #[error("`pixi shell-hook` output is not UTF-8")]
     HookNotUtf8,
     #[error(transparent)]
     Lock(#[from] LockError),
-    #[error("{path}: {source}")]
+    #[error("{path}")]
     Io { path: PathBuf, source: io::Error },
 }
 
@@ -128,15 +129,7 @@ struct Staging {
 impl Staging {
     fn new(export: &Path) -> Result<Self, BakeError> {
         let target = std::path::absolute(export).map_err(BakeError::io(export))?;
-        match fs::read_dir(&target) {
-            Ok(mut entries) => {
-                if entries.next().is_some() {
-                    return Err(BakeError::ExportNotEmpty(target));
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(BakeError::io(&target)(e)),
-        }
+        EmptyDir::new(&target)?;
         let parent = target.parent().unwrap_or_else(|| Path::new("/"));
         fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
         let temp = tempfile::Builder::new()
@@ -179,29 +172,12 @@ impl Staging {
     }
 }
 
-/// The pixi executable that `bake` drives.
-#[derive(Debug, Clone)]
-pub struct Pixi(OsString);
-
 impl Pixi {
-    pub fn at(program: impl Into<OsString>) -> Self {
-        Self(program.into())
-    }
-
-    fn command(&self, workspace: &Path, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.0);
-        command.args(args).current_dir(workspace);
-        command
-    }
-
-    fn describe(&self, args: &[&str]) -> String {
-        format!("{} {}", self.0.to_string_lossy(), args.join(" "))
-    }
-
     fn run(&self, workspace: &Path, args: &[&str]) -> Result<(), BakeError> {
         let command = self.describe(args);
         let status = self
-            .command(workspace, args)
+            .command(workspace)
+            .args(args)
             .status()
             .map_err(|source| BakeError::Spawn {
                 command: command.clone(),
@@ -212,19 +188,6 @@ impl Pixi {
         } else {
             Err(BakeError::CommandFailed { command, status })
         }
-    }
-
-    fn resolved(&self) -> PathBuf {
-        let program = Path::new(&self.0);
-        if program.components().count() > 1 {
-            return program.to_path_buf();
-        }
-        std::env::var_os("PATH")
-            .into_iter()
-            .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-            .map(|dir| dir.join(program))
-            .find(|candidate| is_executable(candidate))
-            .unwrap_or_else(|| program.to_path_buf())
     }
 
     fn capture_with_marked_path(
@@ -253,12 +216,6 @@ impl Pixi {
     }
 }
 
-impl Default for Pixi {
-    fn default() -> Self {
-        Self::at("pixi")
-    }
-}
-
 fn source_dirs(workspace: &AbsPath, env: &str) -> Result<Vec<AbsPath>, BakeError> {
     let lock = read_lock(&workspace.as_path().join(LOCK_FILE))?;
     let packages = scoped_packages(&lock, env, current_subdir()?)?;
@@ -270,7 +227,12 @@ fn source_dirs(workspace: &AbsPath, env: &str) -> Result<Vec<AbsPath>, BakeError
         }) = SourcePackage::of(package)
         {
             let dir = workspace.as_path().join(path.as_str());
-            dirs.insert(AbsPath::new(&dir).map_err(|_| BakeError::MissingSourceDir(dir))?);
+            dirs.insert(match AbsPath::new(&dir) {
+                Err(BakeError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                    return Err(MissingSourceDir(dir).into());
+                }
+                found => found?,
+            });
         }
     }
     Ok(outermost(dirs))
@@ -334,11 +296,6 @@ fn copy_into_export(export: &Staging, source: &AbsPath, skip: &[&Path]) -> Resul
         fs::create_dir_all(parent).map_err(BakeError::io(parent))?;
     }
     copy_tree(source.as_path(), &to, skip)
-}
-
-fn is_executable(path: &Path) -> bool {
-    path.metadata()
-        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 fn copy_sourced_file(export: &Staging, file: &Path) -> Result<(), BakeError> {

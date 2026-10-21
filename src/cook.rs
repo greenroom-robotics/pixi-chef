@@ -5,6 +5,7 @@ use std::process::{Command, ExitStatus};
 use rattler_conda_types::Subdir;
 use rattler_lock::LockFile;
 
+use crate::pixi::Pixi;
 use crate::workspace::{
     LOCK_FILE, LockError, MANIFEST_FILE, ScopeError, SourcePackage, current_subdir, read_lock,
     scoped_packages,
@@ -25,7 +26,7 @@ pub enum CookError {
 pub struct SkipList(BTreeSet<String>);
 
 impl SkipList {
-    pub fn new(lock: &LockFile, name: &str, subdir: Subdir) -> Result<Self, CookError> {
+    pub fn new(lock: &LockFile, name: &str, subdir: Subdir) -> Result<Self, ScopeError> {
         let packages = scoped_packages(lock, name, subdir)?;
         Ok(Self(
             packages
@@ -40,25 +41,29 @@ impl SkipList {
     }
 }
 
-pub fn install_command(workspace: &Path, environment: &str, skip: &SkipList) -> Command {
-    let mut command = Command::new("pixi");
+pub fn install_command(
+    pixi: &Pixi,
+    workspace: &Path,
+    environment: &str,
+    skip: &SkipList,
+) -> Command {
+    let mut command = pixi.command(workspace);
     command
         .arg("install")
         .arg("--manifest-path")
         .arg(workspace.join(MANIFEST_FILE))
         .args(["--locked", "-e", environment]);
-    command.current_dir(workspace);
     for name in skip.names() {
         command.args(["--skip", name]);
     }
     command
 }
 
-pub fn cook(workspace: &Path, environment: &str) -> Result<ExitStatus, CookError> {
+pub fn cook(pixi: &Pixi, workspace: &Path, environment: &str) -> Result<ExitStatus, CookError> {
     let lock = read_lock(&workspace.join(LOCK_FILE))?;
     let subdir = current_subdir()?;
     let skip = SkipList::new(&lock, environment, subdir)?;
-    install_command(workspace, environment, &skip)
+    install_command(pixi, workspace, environment, &skip)
         .status()
         .map_err(CookError::Spawn)
 }
