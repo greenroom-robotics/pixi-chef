@@ -1,0 +1,31 @@
+---
+source: tests/prepare.rs
+expression: "recipe(\"local_binary\", \"pixi.toml\")"
+---
+=== pixi.lock
+version: 7
+platforms:
+- name: linux-64
+environments:
+  default:
+    channels:
+    - url: https://prefix.dev/conda-forge/
+    packages:
+      linux-64:
+      - conda: ./vendor/blob-1.0-0.conda
+packages:
+- conda: ./vendor/blob-1.0-0.conda
+  sha256: 0000000000000000000000000000000000000000000000000000000000000000
+  md5: 00000000000000000000000000000000
+  subdir: linux-64
+  depends: []
+  size: 1
+
+=== pixi.toml
+[workspace]
+name = "local_binary"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+blob = "*"
