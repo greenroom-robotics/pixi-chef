@@ -33,7 +33,7 @@ pub enum PrepareError {
     #[error("reading lock file {path}: {source}")]
     Lock {
         path: PathBuf,
-        source: ParseCondaLockError,
+        source: Box<ParseCondaLockError>,
     },
     #[error(transparent)]
     Path(#[from] RepoPathError),
@@ -82,7 +82,7 @@ impl Recipe {
         let lock_path = root.join(workspace_dir.as_path()).join(LOCK_FILE);
         let lock = LockFile::from_path(&lock_path).map_err(|source| PrepareError::Lock {
             path: lock_path.clone(),
-            source,
+            source: Box::new(source),
         })?;
 
         let mut files = BTreeSet::new();
