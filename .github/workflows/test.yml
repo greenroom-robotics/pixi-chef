@@ -36,3 +36,29 @@ jobs:
 
       - name: Test
         run: pixi run -e test test
+
+  layer-cache:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_NET_RETRY: "5"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
+        with:
+          run-install: false
+          pixi-version: v0.82.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - run: cargo build --locked
+
+      - name: Layer cache
+        env:
+          PIXI_CHEF_BIN: target/debug/pixi-chef
+        run: python3 -m unittest discover -s tests/docker -v
