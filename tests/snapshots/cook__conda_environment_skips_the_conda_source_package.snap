@@ -1,0 +1,5 @@
+---
+source: tests/cook.rs
+expression: "rendered_command(\"conda\")?"
+---
+pixi install --locked -e conda --skip app

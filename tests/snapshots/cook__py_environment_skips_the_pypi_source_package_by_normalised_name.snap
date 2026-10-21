@@ -1,0 +1,5 @@
+---
+source: tests/cook.rs
+expression: "rendered_command(\"py\")?"
+---
+pixi install --locked -e py --skip my-lib

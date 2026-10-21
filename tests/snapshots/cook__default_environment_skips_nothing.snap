@@ -1,0 +1,5 @@
+---
+source: tests/cook.rs
+expression: "rendered_command(\"default\")?"
+---
+pixi install --locked -e default
