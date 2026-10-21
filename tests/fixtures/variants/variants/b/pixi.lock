@@ -1,0 +1,14 @@
+version: 7
+platforms:
+- name: linux-64
+environments:
+  default:
+    channels:
+    - url: https://prefix.dev/conda-forge/
+    packages:
+      linux-64:
+      - conda_source: app[aaaaaaaa] @ ../../pkg/app
+packages:
+- conda_source: app[aaaaaaaa] @ ../../pkg/app
+  variants:
+    target_platform: linux-64

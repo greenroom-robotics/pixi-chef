@@ -1,8 +1,9 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rattler_lock::{
     CondaPackageData, LockFile, LockedPackage, ParseCondaLockError, PypiPackageData, UrlOrPath,
 };
@@ -20,6 +21,7 @@ const METADATA_FILES: [&str; 8] = [
     "README.md",
 ];
 
+const MANIFEST_FILE: &str = "pixi.toml";
 const LOCK_FILE: &str = "pixi.lock";
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,8 @@ pub enum PrepareError {
         path: PathBuf,
         source: Box<ParseCondaLockError>,
     },
+    #[error("building include globs: {0}")]
+    Globs(#[from] globset::Error),
     #[error(transparent)]
     Path(#[from] RepoPathError),
     #[error("{path}: {source}")]
@@ -46,6 +50,12 @@ impl PrepareError {
         let path = path.to_path_buf();
         move |source| Self::Io { path, source }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PrepareOptions {
+    pub into: Option<PathBuf>,
+    pub include: Vec<Glob>,
 }
 
 /// A directory that does not exist yet or exists and holds nothing.
@@ -66,46 +76,57 @@ impl EmptyDir {
     }
 }
 
-/// Repo-relative files that all exist under the repo root.
+/// Maps each recipe path to the repo path it is copied from.
 struct Recipe {
-    files: BTreeSet<RepoPath>,
+    files: BTreeMap<RepoPath, RepoPath>,
 }
 
 impl Recipe {
-    fn gather(root: &Path, manifest: &RepoPath) -> Result<Self, PrepareError> {
+    fn gather(
+        root: &Path,
+        manifest: &RepoPath,
+        into: Option<&RepoPath>,
+        include: &GlobSet,
+    ) -> Result<Self, PrepareError> {
         if !root.join(manifest.as_path()).is_file() {
             return Err(PrepareError::MissingManifest(
                 manifest.as_path().to_path_buf(),
             ));
         }
-        let workspace_dir = manifest.parent();
-        let lock_path = root.join(workspace_dir.as_path()).join(LOCK_FILE);
+        let manifest_dir = manifest.parent();
+        let lock_path = root.join(manifest_dir.as_path()).join(LOCK_FILE);
         let lock = LockFile::from_path(&lock_path).map_err(|source| PrepareError::Lock {
             path: lock_path.clone(),
             source: Box::new(source),
         })?;
 
-        let mut files = BTreeSet::new();
-        files.insert(manifest.clone());
-        files.insert(workspace_dir.join(Path::new(LOCK_FILE), root)?);
+        let workspace_dir = into.cloned().unwrap_or(manifest_dir);
+        let mut files = BTreeMap::new();
+        files.insert(
+            workspace_dir.join(Path::new(MANIFEST_FILE), root)?,
+            manifest.clone(),
+        );
+        let recipe_lock = workspace_dir.join(Path::new(LOCK_FILE), root)?;
+        files.insert(
+            recipe_lock,
+            manifest.parent().join(Path::new(LOCK_FILE), root)?,
+        );
 
         for dir in source_dirs(&lock, &workspace_dir, root)? {
             if !root.join(dir.as_path()).is_dir() {
                 return Err(PrepareError::MissingSourceDir(dir.as_path().to_path_buf()));
             }
-            for name in METADATA_FILES {
-                let file = dir.join(Path::new(name), root)?;
-                if root.join(file.as_path()).is_file() {
-                    files.insert(file);
-                }
+            for relative in metadata_files(&root.join(dir.as_path()), include)? {
+                let file = dir.join(&relative, root)?;
+                files.insert(file.clone(), file);
             }
         }
         Ok(Self { files })
     }
 
     fn write(&self, root: &Path, out: &EmptyDir) -> Result<(), PrepareError> {
-        for file in &self.files {
-            let from = root.join(file.as_path());
+        for (file, source) in &self.files {
+            let from = root.join(source.as_path());
             let to = out.0.join(file.as_path());
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent).map_err(PrepareError::io(parent))?;
@@ -114,6 +135,35 @@ impl Recipe {
         }
         Ok(())
     }
+}
+
+fn metadata_files(dir: &Path, include: &GlobSet) -> Result<Vec<PathBuf>, PrepareError> {
+    let mut found = Vec::new();
+    for name in METADATA_FILES {
+        if dir.join(name).is_file() {
+            found.push(PathBuf::from(name));
+        }
+    }
+    if !include.is_empty() {
+        let mut all = Vec::new();
+        list_files(dir, Path::new(""), &mut all)?;
+        found.extend(all.into_iter().filter(|path| include.is_match(path)));
+    }
+    Ok(found)
+}
+
+fn list_files(base: &Path, relative: &Path, out: &mut Vec<PathBuf>) -> Result<(), PrepareError> {
+    let dir = base.join(relative);
+    for entry in fs::read_dir(&dir).map_err(PrepareError::io(&dir))? {
+        let entry = entry.map_err(PrepareError::io(&dir))?;
+        let path = relative.join(entry.file_name());
+        if entry.path().is_dir() {
+            list_files(base, &path, out)?;
+        } else {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 fn source_dirs(
@@ -139,9 +189,23 @@ fn source_location(package: &LockedPackage) -> Option<&UrlOrPath> {
     }
 }
 
-pub fn prepare(root: &Path, manifest: &Path, out: &Path) -> Result<(), PrepareError> {
+pub fn prepare(
+    root: &Path,
+    manifest: &Path,
+    out: &Path,
+    options: &PrepareOptions,
+) -> Result<(), PrepareError> {
     let out = EmptyDir::new(out)?;
     let manifest = RepoPath::new(manifest, root)?;
-    let recipe = Recipe::gather(root, &manifest)?;
+    let into = options
+        .into
+        .as_deref()
+        .map(|dir| RepoPath::new(dir, root))
+        .transpose()?;
+    let mut include = GlobSetBuilder::new();
+    for glob in &options.include {
+        include.add(glob.clone());
+    }
+    let recipe = Recipe::gather(root, &manifest, into.as_ref(), &include.build()?)?;
     recipe.write(root, &out)
 }
