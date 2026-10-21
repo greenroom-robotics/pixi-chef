@@ -580,3 +580,72 @@ fn include_ignores_the_global_git_excludes_file() -> TestResult {
     assert!(recipe_dir.join("app/notes.txt").is_file());
     Ok(())
 }
+
+fn script_repo(manifest: &str) -> Result<tempfile::TempDir, Box<dyn Error>> {
+    let lock =
+        fs::read_to_string(fixture("conda_source").join("pixi.lock"))?.replace("@ app", "@ ../app");
+    repo_with(&[
+        ("ws/pixi.toml", manifest),
+        ("ws/pixi.lock", &lock),
+        ("app/package.xml", ""),
+    ])
+}
+
+fn into_script_result(manifest: &str) -> Result<Result<Vec<PathBuf>, String>, Box<dyn Error>> {
+    let repo = script_repo(manifest)?;
+    Ok(prepare_in(&repo, "ws/pixi.toml", &Opts::into("shared")).map_err(|e| e.to_string()))
+}
+
+#[test]
+fn into_is_rejected_for_activation_scripts_beside_the_manifest() -> TestResult {
+    let sections = [
+        ("[activation]", "[activation] scripts"),
+        (
+            "[target.linux-64.activation]",
+            "[target.linux-64.activation] scripts",
+        ),
+        (
+            "[feature.gpu.activation]",
+            "[feature.gpu.activation] scripts",
+        ),
+        (
+            "[feature.gpu.target.unix.activation]",
+            "[feature.gpu.target.unix.activation] scripts",
+        ),
+    ];
+    for (header, key) in sections {
+        let manifest = format!("{header}\nscripts = [\"../common/ok.sh\", \"activate.sh\"]\n");
+        let message = into_script_result(&manifest)?.expect_err("must be rejected");
+        assert!(
+            message.contains("--into shared")
+                && message.contains(key)
+                && message.contains("activate.sh"),
+            "{header}: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn into_accepts_activation_scripts_that_resolve_alike() -> TestResult {
+    let manifest = "[activation]\nscripts = [\"../common/a.sh\", \"/opt/abs.sh\"]\n\
+        [feature.gpu.activation]\nscripts = [\"../common/b.sh\"]\n\
+        [target.win-64.activation]\nscripts = [\"../common/c.bat\"]\n\
+        [feature.gpu.target.linux-64.activation]\nscripts = [\"../common/d.sh\"]\n";
+    assert!(into_script_result(manifest)?.is_ok());
+    Ok(())
+}
+
+#[test]
+fn into_is_rejected_for_build_variants_files_beside_the_manifest() -> TestResult {
+    let message = into_script_result("[workspace]\nbuild-variants-files = [\"variants.yaml\"]\n")?
+        .expect_err("must be rejected");
+    assert!(message.contains("build-variants-files"), "{message}");
+    Ok(())
+}
+
+#[test]
+fn into_rejects_a_manifest_that_is_not_toml() -> TestResult {
+    assert!(into_script_result("[activation\n")?.is_err());
+    Ok(())
+}

@@ -27,8 +27,10 @@ enum Command {
         /// Directory to write the recipe into; must be absent or empty.
         out: PathBuf,
         /// Directory to place the manifest and lock at in the recipe; every
-        /// local path in the lock must resolve the same from there as from
-        /// the manifest's directory.
+        /// local path in the lock and every manifest-relative activation
+        /// script must resolve the same from there as from the manifest's
+        /// directory. Cook and bake both run in this directory, so
+        /// PIXI_PROJECT_ROOT is this directory at runtime.
         #[arg(long)]
         into: Option<PathBuf>,
         /// Glob of extra files to copy from each source package directory.

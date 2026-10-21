@@ -16,6 +16,10 @@ _Avoid_: Channel package, remote package
 The trimmed copy of a repo holding only the workspace manifest, its lock, and the metadata files of each source package, laid out at their real paths.
 _Avoid_: Skeleton, metadata tree, manifests
 
+**Into directory**:
+The directory `prepare --into` places the manifest and lock at. Cook and bake both run there, so `PIXI_PROJECT_ROOT` is that directory at runtime, and every path the manifest and lock name must resolve to the same repo path from it as from the manifest's own directory.
+_Avoid_: Recipe root, workspace dir
+
 **Export**:
 A tree laid out as a filesystem root that holds one installed environment, every source package's directory, the activation hook and the entrypoint, ready to copy onto a runtime image.
 _Avoid_: Bundle, pack, output

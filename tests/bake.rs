@@ -11,6 +11,8 @@ use pixi_chef::fs::EmptyDirError;
 use pixi_chef::pixi::Pixi;
 use pixi_chef::workspace::ScopeError;
 
+const HOST_SUBDIR_SELECTOR: &str = "unix";
+
 type TestResult = Result<(), Box<dyn Error>>;
 
 fn fixture(name: &str) -> PathBuf {
@@ -272,6 +274,65 @@ fn sourced_file_that_does_not_exist_is_a_failure() -> TestResult {
     );
     assert!(matches!(result, Err(BakeError::MissingSourcedFile(_))));
     assert_eq!(fs::read_dir(out.path())?.count(), 0);
+    Ok(())
+}
+
+fn missing_script_error(manifest_tail: &str) -> TestResult {
+    let ws = workspace()?;
+    let manifest = ws.path().join("pixi.toml");
+    let mut text = fs::read_to_string(&manifest)?;
+    text.push_str(manifest_tail);
+    fs::write(&manifest, text)?;
+    let out = tempfile::tempdir()?;
+    let result = run_bake(
+        ws.path(),
+        &fake_pixi(true, HOOK_TAIL)?,
+        &out.path().join("export"),
+    );
+    let error = result.expect_err("bake must fail");
+    assert!(
+        matches!(error, BakeError::MissingActivationScript { .. }),
+        "{error}"
+    );
+    assert!(error.to_string().contains("gone.sh"), "{error}");
+    assert_eq!(fs::read_dir(out.path())?.count(), 0);
+    Ok(())
+}
+
+#[test]
+fn missing_workspace_activation_script_is_a_failure() -> TestResult {
+    missing_script_error("\n[activation]\nscripts = [\"gone.sh\"]\n")
+}
+
+#[test]
+fn missing_activation_script_of_a_feature_in_the_environment_is_a_failure() -> TestResult {
+    missing_script_error(
+        "\n[feature.extra.activation]\nscripts = [\"gone.sh\"]\n\n[environments]\ndefault = [\"extra\"]\n",
+    )
+}
+
+#[test]
+fn missing_activation_script_for_this_platform_is_a_failure() -> TestResult {
+    missing_script_error(&format!(
+        "\n[target.{HOST_SUBDIR_SELECTOR}.activation]\nscripts = [\"gone.sh\"]\n"
+    ))
+}
+
+#[test]
+fn activation_scripts_of_other_features_and_platforms_are_ignored() -> TestResult {
+    let ws = workspace()?;
+    let manifest = ws.path().join("pixi.toml");
+    let mut text = fs::read_to_string(&manifest)?;
+    text.push_str(
+        "\n[feature.other.activation]\nscripts = [\"gone.sh\"]\n\n[target.win-64.activation]\nscripts = [\"gone.bat\"]\n\n[activation]\nscripts = [\"act.sh\"]\n",
+    );
+    fs::write(&manifest, text)?;
+    let out = tempfile::tempdir()?;
+    run_bake(
+        ws.path(),
+        &fake_pixi(true, HOOK_TAIL)?,
+        &out.path().join("export"),
+    )?;
     Ok(())
 }
 

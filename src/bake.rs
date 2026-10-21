@@ -10,7 +10,8 @@ use rattler_lock::UrlOrPath;
 use crate::fs::{EmptyDir, EmptyDirError, MissingSourceDir};
 use crate::pixi::Pixi;
 use crate::workspace::{
-    LOCK_FILE, LockError, ScopeError, SourcePackage, current_subdir, read_lock, scoped_packages,
+    LOCK_FILE, LockError, MANIFEST_FILE, Manifest, ManifestError, ScopeError, SourcePackage,
+    current_subdir, read_lock, scoped_packages,
 };
 
 const EXPORT_PIXI_EXE: &str = "export PIXI_EXE=";
@@ -31,6 +32,10 @@ pub enum BakeError {
     Scope(#[from] ScopeError),
     #[error("`pixi shell-hook` output for environment {0} never used the host PATH marker")]
     HookIgnoresPath(String),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
+    #[error("{key} lists {path}, which does not exist")]
+    MissingActivationScript { key: String, path: PathBuf },
     #[error("hook sources {0}, which does not exist")]
     MissingSourcedFile(PathBuf),
     #[error("cannot move the export into {path}; is it a mount point?")]
@@ -216,6 +221,20 @@ impl Pixi {
     }
 }
 
+fn check_activation_scripts(workspace: &AbsPath, env: &str) -> Result<(), BakeError> {
+    let manifest = Manifest::read(&workspace.as_path().join(MANIFEST_FILE))?;
+    for script in manifest.activation_scripts(env, current_subdir()?)? {
+        let path = workspace.as_path().join(&script.path);
+        if !path.is_file() {
+            return Err(BakeError::MissingActivationScript {
+                key: script.key,
+                path,
+            });
+        }
+    }
+    Ok(())
+}
+
 fn source_dirs(workspace: &AbsPath, env: &str) -> Result<Vec<AbsPath>, BakeError> {
     let lock = read_lock(&workspace.as_path().join(LOCK_FILE))?;
     let packages = scoped_packages(&lock, env, current_subdir()?)?;
@@ -339,11 +358,17 @@ fn assemble(
     staging: &Staging,
 ) -> Result<(), BakeError> {
     let sources = source_dirs(workspace, env)?;
+    check_activation_scripts(workspace, env)?;
     let work = workspace.as_path();
 
     pixi.run(work, &["install", "--locked", "-e", env])?;
-    let env_dir = AbsPath::new(&work.join(".pixi/envs").join(env))
-        .map_err(|_| BakeError::MissingEnvironment(work.join(".pixi/envs").join(env)))?;
+    let env_path = work.join(".pixi/envs").join(env);
+    let env_dir = match AbsPath::new(&env_path) {
+        Err(BakeError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(BakeError::MissingEnvironment(env_path));
+        }
+        found => found?,
+    };
     let bash = env_dir.as_path().join("bin/bash");
     if !bash.is_file() {
         return Err(BakeError::MissingBash(env_dir.as_path().to_path_buf()));

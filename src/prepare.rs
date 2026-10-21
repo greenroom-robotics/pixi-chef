@@ -11,7 +11,10 @@ use rattler_lock::{LockFile, UrlOrPath};
 use crate::fs::{EmptyDir, EmptyDirError, MissingSourceDir};
 use crate::include::IncludeGlob;
 use crate::path::{RepoPath, RepoPathError};
-use crate::workspace::{LOCK_FILE, LockError, MANIFEST_FILE, SourcePackage, location, read_lock};
+use crate::workspace::{
+    LOCK_FILE, LockError, MANIFEST_FILE, Manifest, ManifestError, SourcePackage, location,
+    read_lock,
+};
 
 const METADATA_FILES: [&str; 8] = [
     MANIFEST_FILE,
@@ -62,17 +65,19 @@ pub enum WorkspaceError {
     Path(#[from] RepoPathError),
     #[error(transparent)]
     Lock(#[from] LockError),
+    #[error(transparent)]
+    Manifest(#[from] ManifestError),
     #[error("manifest {0} must be named pixi.toml")]
     NotPixiToml(PathBuf),
     #[error(
-        "--into {}: lock path {lock_path} resolves differently from there than from {}",
+        "--into {}: {subject} resolves differently from there than from {}",
         shown(.into),
         shown(.manifest_dir)
     )]
     IntoChangesPath {
         into: PathBuf,
         manifest_dir: PathBuf,
-        lock_path: String,
+        subject: String,
     },
 }
 
@@ -135,9 +140,24 @@ fn check_paths_resolve_alike(
                 return Err(WorkspaceError::IntoChangesPath {
                     into: into.as_path().to_path_buf(),
                     manifest_dir: manifest_dir.as_path().to_path_buf(),
-                    lock_path: path.to_string(),
+                    subject: format!("lock path {path}"),
                 });
             }
+        }
+    }
+    let manifest = Manifest::read(&root.join(manifest_dir.as_path()).join(MANIFEST_FILE))?;
+    for listed in manifest.relative_paths()? {
+        if listed.path.is_absolute() {
+            continue;
+        }
+        let from_manifest = manifest_dir.join(&listed.path, root);
+        let from_into = into.join(&listed.path, root);
+        if !matches!((from_manifest, from_into), (Ok(a), Ok(b)) if a == b) {
+            return Err(WorkspaceError::IntoChangesPath {
+                into: into.as_path().to_path_buf(),
+                manifest_dir: manifest_dir.as_path().to_path_buf(),
+                subject: format!("{} path {}", listed.key, listed.path.display()),
+            });
         }
     }
     Ok(())
