@@ -5,7 +5,7 @@ Splits a pixi workspace's container build into a dependency layer that only chan
 ## Language
 
 **Source package**:
-A lock entry built from a local directory rather than fetched as a built artifact.
+A lock entry built from source (a local directory, git or URL) rather than fetched as a built artifact.
 _Avoid_: Path dep, path package, local package
 
 **Binary package**:
@@ -16,6 +16,10 @@ _Avoid_: Channel package, remote package
 The trimmed copy of a repo holding only the workspace manifest, its lock, and the metadata files of each source package, laid out at their real paths.
 _Avoid_: Skeleton, metadata tree, manifests
 
+**Into directory**:
+The directory `prepare --into` places the manifest and lock at. Cook and bake both run there, so `PIXI_PROJECT_ROOT` is that directory at runtime, and every path the manifest and lock name must resolve to the same repo path from it as from the manifest's own directory.
+_Avoid_: Recipe root, workspace dir
+
 **Export**:
-A tree laid out as a filesystem root that holds one installed environment, every source package's directory, the activation hook and the entrypoint, ready to copy onto a runtime image.
+A tree laid out as a filesystem root that holds one installed environment, every local source package's directory, the activation hook and the entrypoint, ready to copy onto a runtime image.
 _Avoid_: Bundle, pack, output

@@ -1,0 +1,5 @@
+---
+source: tests/cook.rs
+expression: "rendered_command(\"conda\")?"
+---
+pixi install --manifest-path <workspace>/pixi.toml --locked -e conda --skip my_app

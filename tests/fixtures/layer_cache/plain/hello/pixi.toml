@@ -1,0 +1,20 @@
+[workspace]
+name = "hello"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64", "linux-aarch64"]
+preview = ["pixi-build"]
+
+[package]
+name = "hello"
+version = "0.1.0"
+
+[package.build.backend]
+name = "pixi-build-python"
+version = "*"
+
+[package.host-dependencies]
+hatchling = "*"
+python = "3.12.*"
+
+[package.run-dependencies]
+python = "3.12.*"

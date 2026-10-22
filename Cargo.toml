@@ -1,0 +1,39 @@
+[package]
+name = "pixi-chef"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+color-eyre = "0.6.5"
+globset = "0.4.20"
+ignore = "0.4.33"
+rattler_conda_types = { version = "0.57.1", default-features = false }
+rattler_lock = { version = "0.34.8", default-features = false }
+tempfile = "3"
+thiserror = "2"
+toml = "1"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+significant_drop_tightening = "allow"
+must_use_candidate = "allow"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
+
+[dev-dependencies]
+insta = { version = "1.48.0" }

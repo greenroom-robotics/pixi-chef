@@ -1,0 +1,48 @@
+---
+source: tests/prepare.rs
+expression: "recipe(\"pypi_source\", \"pixi.toml\")?"
+---
+=== lib/README.md
+# lib
+
+=== lib/pyproject.toml
+[project]
+name = "lib"
+version = "0.1.0"
+
+=== lib/setup.cfg
+[metadata]
+name = lib
+
+=== lib/setup.py
+from setuptools import setup
+setup()
+
+=== pixi.lock
+version: 7
+platforms:
+- name: linux-64
+environments:
+  default:
+    channels:
+    - url: https://prefix.dev/conda-forge/
+    packages:
+      linux-64:
+      - pypi: lib
+packages:
+- pypi: lib
+  name: lib
+  requires_python: '>=3.9'
+  editable: true
+
+=== pixi.toml
+[workspace]
+name = "pypi_source"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+
+
+[pypi-dependencies]
+lib = { path = "lib" }
