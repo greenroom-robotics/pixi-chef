@@ -140,13 +140,9 @@ BuildKit reuses the `cook` layer while the recipe is byte-identical, and the bas
 `az://` channels need the Greenroom pixi fork; upstream pixi cannot resolve them. The fork reads its credential from Azure environment variables, and only for containers granted in the user-level (`~/.pixi/config.toml`) or system-level pixi config. A grant in the workspace's `.pixi/config.toml` is ignored. Pass the credential as an `env=` secret so it never enters a layer. Replace the `tools` and `cook` stages of the minimal example:
 
 ```dockerfile
-FROM debian:bookworm-slim AS tools
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://github.com/greenroom-robotics/pixi/releases/download/pixi-gr@0.82.0/install.sh | sh
-ENV PATH=/root/.pixi/bin:$PATH
-RUN printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\npublic = false\ngeneral = true\n' \
+FROM ghcr.io/greenroom-robotics/pixi:0.82.1-bookworm AS tools
+RUN mkdir -p /root/.pixi \
+ && printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\ngeneral = true\n' \
     > /root/.pixi/config.toml
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
