@@ -108,7 +108,7 @@ docker run --rm app <program>
 # syntax=docker/dockerfile:1
 ARG PIXI_CHEF_VERSION
 FROM ghcr.io/greenroom-robotics/pixi-chef:${PIXI_CHEF_VERSION} AS chef
-FROM ghcr.io/prefix-dev/pixi:0.82.1 AS tools
+FROM ghcr.io/greenroom-robotics/pixi:0.82.2-bookworm AS tools
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
 FROM tools AS recipe
@@ -140,9 +140,8 @@ BuildKit reuses the `cook` layer while the recipe is byte-identical, and the bas
 `az://` channels need the Greenroom pixi fork; upstream pixi cannot resolve them. The fork reads its credential from Azure environment variables, and only for containers granted in the user-level (`~/.pixi/config.toml`) or system-level pixi config. A grant in the workspace's `.pixi/config.toml` is ignored. Pass the credential as an `env=` secret so it never enters a layer. Replace the `tools` and `cook` stages of the minimal example:
 
 ```dockerfile
-FROM ghcr.io/greenroom-robotics/pixi:0.82.1-bookworm AS tools
-RUN mkdir -p /root/.pixi \
- && printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\ngeneral = true\n' \
+FROM ghcr.io/greenroom-robotics/pixi:0.82.2-bookworm AS tools
+RUN printf '[azure-options."stgrcondachannel.blob.core.windows.net".auth]\ngeneral = true\n' \
     > /root/.pixi/config.toml
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
@@ -236,7 +235,7 @@ When several manifests under `variants/` have the same dependencies, `--into` gi
 ARG PIXI_CHEF_VERSION
 ARG VARIANT=a
 FROM ghcr.io/greenroom-robotics/pixi-chef:${PIXI_CHEF_VERSION} AS chef
-FROM ghcr.io/prefix-dev/pixi:0.82.1 AS tools
+FROM ghcr.io/greenroom-robotics/pixi:0.82.2-bookworm AS tools
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
 FROM tools AS recipe
