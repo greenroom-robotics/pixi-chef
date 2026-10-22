@@ -25,7 +25,7 @@ test = { features = ["test"], no-default-feature = true }
 
 [package]
 name = "pixi-chef"
-version = "0.1.0"
+version = "1.0.0"
 description = "Splits a pixi workspace's container build into a dependency layer and a source layer."
 
 [package.build.backend]
