@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM ghcr.io/prefix-dev/pixi:0.82.0 AS base
+FROM ghcr.io/prefix-dev/pixi:0.82.1 AS base
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 COPY --from=harness /checked.sh /usr/local/bin/checked.sh
 WORKDIR /app

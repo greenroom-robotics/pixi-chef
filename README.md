@@ -108,7 +108,7 @@ docker run --rm app <program>
 # syntax=docker/dockerfile:1
 ARG PIXI_CHEF_VERSION
 FROM ghcr.io/greenroom-robotics/pixi-chef:${PIXI_CHEF_VERSION} AS chef
-FROM ghcr.io/prefix-dev/pixi:0.82.0 AS tools
+FROM ghcr.io/prefix-dev/pixi:0.82.1 AS tools
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
 FROM tools AS recipe
@@ -236,7 +236,7 @@ When several manifests under `variants/` have the same dependencies, `--into` gi
 ARG PIXI_CHEF_VERSION
 ARG VARIANT=a
 FROM ghcr.io/greenroom-robotics/pixi-chef:${PIXI_CHEF_VERSION} AS chef
-FROM ghcr.io/prefix-dev/pixi:0.82.0 AS tools
+FROM ghcr.io/prefix-dev/pixi:0.82.1 AS tools
 COPY --from=chef /pixi-chef /usr/local/bin/pixi-chef
 
 FROM tools AS recipe
